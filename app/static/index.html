@@ -514,6 +514,7 @@ function switchTab(tab) {
 
 function toggleMemories() {
   const panel = document.getElementById('memoriesPanel');
+  panel.classList.toggle('hidden');
   panel.classList.toggle('open');
   refreshMemories();
 }
