@@ -403,9 +403,11 @@ body {
   }
   .memories-panel.open {
     transform: translateX(0);
+    pointer-events: auto;
   }
   .memories-panel.hidden {
     transform: translateX(100%);
+    pointer-events: none;
   }
 
   .mobile-close-btn {
