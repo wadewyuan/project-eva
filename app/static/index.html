@@ -210,6 +210,9 @@ body {
   cursor: pointer;
   color: #666;
 }
+.mobile-close-btn {
+  display: none;
+}
 .memories-header button:hover {
   background: #f0f0f0;
 }
@@ -401,7 +404,11 @@ body {
     transform: translateX(0);
   }
   .memories-panel.hidden {
-    display: flex;
+    transform: translateX(100%);
+  }
+
+  .mobile-close-btn {
+    display: inline-block;
   }
 
   .sidebar-footer {
@@ -457,6 +464,7 @@ body {
   <div class="memories-header">
     长期记忆
     <div style="display:flex;gap:6px">
+      <button class="mobile-close-btn" onclick="toggleMemories()">×</button>
       <button onclick="refreshMemories()">刷新</button>
       <button class="danger-btn" onclick="confirmClearMemories()">清除全部</button>
     </div>
@@ -503,7 +511,6 @@ function switchTab(tab) {
 
 function toggleMemories() {
   const panel = document.getElementById('memoriesPanel');
-  panel.classList.toggle('hidden');
   panel.classList.toggle('open');
   refreshMemories();
 }
