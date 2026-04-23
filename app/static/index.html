@@ -178,6 +178,71 @@ body {
   background: #ccc;
   cursor: not-allowed;
 }
+.voice-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: #e8e8e8;
+  color: #555;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.voice-btn:hover {
+  background: #d0d0d0;
+}
+.voice-btn.recording {
+  background: #e53935;
+  color: #fff;
+  animation: pulse 1.2s infinite;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(229,57,53,0.5); }
+  70% { box-shadow: 0 0 0 10px rgba(229,57,53,0); }
+  100% { box-shadow: 0 0 0 0 rgba(229,57,53,0); }
+}
+.msg-play-btn {
+  position: absolute;
+  bottom: 4px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: #bbb;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+}
+.msg-play-btn:hover {
+  color: #2196F3;
+}
+.msg-play-btn.playing {
+  color: #2196F3;
+}
+.message.assistant {
+  position: relative;
+  padding-bottom: 26px;
+}
+.auto-play-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #666;
+  cursor: pointer;
+  user-select: none;
+}
+.auto-play-toggle input {
+  cursor: pointer;
+}
 
 /* Memories panel */
 .memories-panel {
@@ -389,6 +454,10 @@ body {
     padding: 8px 14px;
     font-size: 14px;
   }
+  .voice-btn {
+    width: 36px;
+    height: 36px;
+  }
 
   .memories-panel {
     position: fixed;
@@ -453,11 +522,18 @@ body {
     </div>
     <div style="display:flex;align-items:center;gap:8px">
       <span class="tone-badge" id="toneBadge" style="display:none">默认</span>
+      <label class="auto-play-toggle" title="AI 回复后自动朗读">
+        <input type="checkbox" id="autoPlayToggle" onchange="saveAutoPlaySetting()">
+        <span>自动朗读</span>
+      </label>
       <button class="toggle-btn" onclick="toggleMemories()">记忆</button>
     </div>
   </div>
   <div class="messages" id="messages"></div>
   <div class="input-area">
+    <button id="micBtn" class="voice-btn" onclick="toggleRecording()" title="语音输入">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+    </button>
     <textarea id="input" rows="2" placeholder="说点什么..." onkeydown="handleKey(event)"></textarea>
     <button id="sendBtn" onclick="sendMessage()">发送</button>
   </div>
@@ -523,14 +599,32 @@ function appendMessage(role, content) {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = `message ${role}`;
-  div.textContent = content;
+
+  const textDiv = document.createElement('div');
+  textDiv.className = 'msg-text';
+  textDiv.textContent = content;
+  div.appendChild(textDiv);
+
+  if (role === 'assistant' || role === 'assistant streaming') {
+    const playBtn = document.createElement('button');
+    playBtn.className = 'msg-play-btn';
+    playBtn.title = '朗读';
+    playBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon></svg>';
+    playBtn.onclick = function () {
+      const text = this.parentElement.querySelector('.msg-text').textContent;
+      playManual(text, this);
+    };
+    div.appendChild(playBtn);
+  }
+
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
   return div;
 }
 
 function updateStreamingMessage(el, content) {
-  el.textContent = content;
+  const textEl = el.querySelector('.msg-text');
+  if (textEl) textEl.textContent = content;
   const container = document.getElementById('messages');
   container.scrollTop = container.scrollHeight;
 }
@@ -554,6 +648,9 @@ async function sendMessage() {
 
   const assistantEl = appendMessage('assistant streaming', '');
   let fullReply = '';
+  const autoPlay = document.getElementById('autoPlayToggle').checked;
+  ttsBuffer = '';
+  if (autoPlay) autoPlayTargetBtn = assistantEl.querySelector('.msg-play-btn');
 
   try {
     const res = await fetch('/chat/stream', {
@@ -578,6 +675,10 @@ async function sendMessage() {
           if (data.type === 'token') {
             fullReply += data.data;
             updateStreamingMessage(assistantEl, fullReply);
+            if (autoPlay) {
+              ttsBuffer += data.data;
+              tryFlushTTSBuffer();
+            }
           } else if (data.type === 'done') {
             sessionId = data.session_id;
             const badge = document.getElementById('toneBadge');
@@ -585,12 +686,18 @@ async function sendMessage() {
             badge.style.display = 'inline';
             assistantEl.classList.remove('streaming');
             refreshMemories();
+            if (autoPlay && ttsBuffer.trim()) {
+              ttsTextQueue.push(ttsBuffer.trim());
+              ttsBuffer = '';
+              processTTSPipeline();
+            }
           }
         } catch (e) {}
       }
     }
   } catch (err) {
-    assistantEl.textContent = '出错啦，请重试';
+    const textEl = assistantEl.querySelector('.msg-text');
+    if (textEl) textEl.textContent = '出错啦，请重试';
     assistantEl.classList.remove('streaming');
   }
 
@@ -639,8 +746,221 @@ async function doClearMemories() {
   }
 }
 
+// ---------- Voice ----------
+
+let mediaRecorder = null;
+let audioChunks = [];
+let isRecording = false;
+let currentAudio = null;
+let currentPlayingBtn = null;
+
+// Streamed TTS pipeline: text -> [synthesize] -> audio -> [play]
+let ttsBuffer = '';
+let ttsTextQueue = [];
+let ttsAudioQueue = [];
+let ttsIsSynthesizing = false;
+let ttsIsPlaying = false;
+let autoPlayTargetBtn = null;
+
+const SENTENCE_END_RE = /[。！？.!?…]+/;
+const TTS_MIN_SEGMENT = 20;
+const TTS_MAX_SEGMENT = 80;
+
+function stopCurrentAudio() {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.onended = null;
+    currentAudio.onerror = null;
+    currentAudio = null;
+  }
+  for (const item of ttsAudioQueue) {
+    if (item.url) URL.revokeObjectURL(item.url);
+  }
+  ttsAudioQueue = [];
+  ttsTextQueue = [];
+  ttsIsPlaying = false;
+  ttsIsSynthesizing = false;
+  ttsBuffer = '';
+  if (currentPlayingBtn) {
+    currentPlayingBtn.classList.remove('playing');
+    currentPlayingBtn = null;
+  }
+  if (autoPlayTargetBtn) {
+    autoPlayTargetBtn.classList.remove('playing');
+    autoPlayTargetBtn = null;
+  }
+}
+
+function tryFlushTTSBuffer() {
+  while (ttsBuffer.length >= TTS_MIN_SEGMENT) {
+    const match = ttsBuffer.match(SENTENCE_END_RE);
+    if (match) {
+      const end = match.index + match[0].length;
+      const seg = ttsBuffer.slice(0, end).trim();
+      ttsBuffer = ttsBuffer.slice(end).trimStart();
+      if (seg) { ttsTextQueue.push(seg); processTTSPipeline(); }
+    } else if (ttsBuffer.length > TTS_MAX_SEGMENT) {
+      let cut = ttsBuffer.lastIndexOf('，', TTS_MAX_SEGMENT);
+      if (cut < TTS_MIN_SEGMENT) cut = ttsBuffer.lastIndexOf('、', TTS_MAX_SEGMENT);
+      if (cut < TTS_MIN_SEGMENT) cut = ttsBuffer.lastIndexOf(' ', TTS_MAX_SEGMENT);
+      if (cut < TTS_MIN_SEGMENT) cut = TTS_MAX_SEGMENT;
+      const seg = ttsBuffer.slice(0, cut).trim();
+      ttsBuffer = ttsBuffer.slice(cut).trimStart();
+      if (seg) { ttsTextQueue.push(seg); processTTSPipeline(); }
+    } else {
+      break;
+    }
+  }
+}
+
+async function processTTSPipeline() {
+  if (ttsIsSynthesizing) return;
+  ttsIsSynthesizing = true;
+  try {
+    while (ttsTextQueue.length > 0) {
+      const text = ttsTextQueue.shift();
+      try {
+        const res = await fetch('/voice/synthesize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text })
+        });
+        if (!res.ok) continue;
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        ttsAudioQueue.push({ url });
+        if (!ttsIsPlaying) playNextInQueue();
+      } catch (e) {}
+    }
+  } finally {
+    ttsIsSynthesizing = false;
+    // If new text arrived while we were synthesizing, drain again
+    if (ttsTextQueue.length > 0) processTTSPipeline();
+  }
+}
+
+function playNextInQueue() {
+  if (ttsAudioQueue.length === 0) {
+    ttsIsPlaying = false;
+    if (autoPlayTargetBtn) {
+      autoPlayTargetBtn.classList.remove('playing');
+      autoPlayTargetBtn = null;
+    }
+    return;
+  }
+  ttsIsPlaying = true;
+  const item = ttsAudioQueue.shift();
+  if (autoPlayTargetBtn) autoPlayTargetBtn.classList.add('playing');
+  currentAudio = new Audio(item.url);
+  currentAudio.onended = () => {
+    URL.revokeObjectURL(item.url);
+    currentAudio = null;
+    playNextInQueue();
+  };
+  currentAudio.onerror = () => {
+    URL.revokeObjectURL(item.url);
+    currentAudio = null;
+    playNextInQueue();
+  };
+  currentAudio.play().catch(() => {
+    URL.revokeObjectURL(item.url);
+    currentAudio = null;
+    playNextInQueue();
+  });
+}
+
+async function playManual(text, btnEl) {
+  if (!text) return;
+  stopCurrentAudio();
+  currentPlayingBtn = btnEl;
+  if (btnEl) btnEl.classList.add('playing');
+  try {
+    const res = await fetch('/voice/synthesize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    if (!res.ok) throw new Error('合成失败');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    currentAudio = new Audio(url);
+    currentAudio.onended = () => {
+      URL.revokeObjectURL(url);
+      stopCurrentAudio();
+    };
+    currentAudio.onerror = () => {
+      URL.revokeObjectURL(url);
+      stopCurrentAudio();
+    };
+    await currentAudio.play();
+  } catch (err) {
+    stopCurrentAudio();
+  }
+}
+
+async function toggleRecording() {
+  const btn = document.getElementById('micBtn');
+  if (isRecording) {
+    mediaRecorder.stop();
+    isRecording = false;
+    btn.classList.remove('recording');
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+    audioChunks = [];
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) audioChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      if (audioChunks.length === 0) return;
+      const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      const formData = new FormData();
+      formData.append('audio', blob, 'recording.webm');
+
+      const input = document.getElementById('input');
+      input.placeholder = '识别中...';
+      try {
+        const res = await fetch('/voice/transcribe', { method: 'POST', body: formData });
+        if (!res.ok) throw new Error('识别失败');
+        const data = await res.json();
+        input.value = data.text || '';
+      } catch (err) {
+        input.placeholder = '识别出错，请重试';
+        setTimeout(() => { input.placeholder = '说点什么...'; }, 2000);
+      }
+    };
+
+    mediaRecorder.start();
+    isRecording = true;
+    btn.classList.add('recording');
+  } catch (err) {
+    console.error('麦克风错误:', err.name, err.message);
+    alert('无法访问麦克风: ' + (err.message || err.name || '请检查权限设置'));
+  }
+}
+
+function saveAutoPlaySetting() {
+  const toggle = document.getElementById('autoPlayToggle');
+  localStorage.setItem('eva_auto_play', toggle.checked);
+}
+
+function loadAutoPlaySetting() {
+  const toggle = document.getElementById('autoPlayToggle');
+  toggle.checked = localStorage.getItem('eva_auto_play') === 'true';
+}
+
 // Welcome message
 appendMessage('assistant', '嗨，我是小夏。想聊点什么？');
+loadAutoPlaySetting();
 </script>
 </body>
 </html>
