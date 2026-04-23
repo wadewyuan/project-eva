@@ -68,3 +68,13 @@ class PersonaDetail(BaseModel):
     speaking_style: list[str]
     personality_traits: list[str]
     forbidden: list[str]
+
+
+# ---------- Voice ----------
+
+class VoiceTranscribeResponse(BaseModel):
+    text: str
+
+
+class VoiceSynthesizeRequest(BaseModel):
+    text: str = Field(..., min_length=1)

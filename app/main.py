@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api import chat, memory, persona
+from app.api import chat, memory, persona, voice
 from app.core.memory_engine import memory_engine
 
 
@@ -19,6 +19,7 @@ app = FastAPI(title="Eva - 虚拟情感陪伴助手", lifespan=lifespan)
 app.include_router(chat.router)
 app.include_router(memory.router)
 app.include_router(persona.router)
+app.include_router(voice.router)
 
 static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
