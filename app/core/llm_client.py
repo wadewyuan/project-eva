@@ -27,7 +27,8 @@ class LLMClient:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
-        return response.choices[0].message.content or ""
+        msg = response.choices[0].message
+        return (msg.content or "").strip()
 
     async def _stream_chat(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         stream = await self.client.chat.completions.create(
@@ -38,8 +39,11 @@ class LLMClient:
             stream=True,
         )
         async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                text = getattr(delta, "content", None) or ""
+                if text:
+                    yield text
 
     async def detect_tone(self, user_message: str) -> str:
         """Lightweight tone/scene detection."""
@@ -70,9 +74,10 @@ class LLMClient:
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=100,
+            max_tokens=200,
         )
-        tone = response.choices[0].message.content or "默认"
+        msg = response.choices[0].message
+        tone = (msg.content or "").strip() or "默认"
         tone = tone.strip().replace("，", "").replace("。", "").replace("：", "").replace(" ", "")
         tone_map = {
             "吐槽": "tucao",
@@ -104,8 +109,8 @@ class LLMClient:
                 temperature=0.2,
                 max_tokens=1024,
             )
-            raw = response.choices[0].message.content or ""
-            raw = raw.strip()
+            msg = response.choices[0].message
+            raw = (msg.content or "").strip()
             if not raw or raw == "无":
                 return []
             results = []
