@@ -10,7 +10,7 @@ class Settings(BaseSettings):
 
     # LLM
     llm_base_url: str = "http://localhost:8080/v1"
-    llm_model: str = "Qwen/Qwen2.5-14B-Instruct"
+    llm_model: str = "qwen-3.5-9b"
     llm_api_key: str = "sk-no-key-required"
     llm_temperature: float = 0.8
     llm_max_tokens: int = 2048
