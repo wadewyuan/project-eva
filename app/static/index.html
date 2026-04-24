@@ -689,7 +689,8 @@ async function sendMessage() {
             assistantEl.classList.remove('streaming');
             refreshMemories();
             if (autoPlay && ttsBuffer.trim()) {
-              ttsTextQueue.push(ttsBuffer.trim());
+              const seg = stripEmoji(ttsBuffer);
+              if (seg) ttsTextQueue.push(seg);
               ttsBuffer = '';
               processTTSPipeline();
             }
@@ -767,6 +768,11 @@ let autoPlayTargetBtn = null;
 const SENTENCE_END_RE = /[。！？.!?…]+/;
 const TTS_MIN_SEGMENT = 20;
 const TTS_MAX_SEGMENT = 80;
+const EMOJI_RE = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
+
+function stripEmoji(text) {
+  return text.replace(EMOJI_RE, '').trim();
+}
 
 function stopCurrentAudio() {
   if (currentAudio) {
@@ -798,7 +804,7 @@ function tryFlushTTSBuffer() {
     const match = ttsBuffer.match(SENTENCE_END_RE);
     if (match) {
       const end = match.index + match[0].length;
-      const seg = ttsBuffer.slice(0, end).trim();
+      const seg = stripEmoji(ttsBuffer.slice(0, end));
       ttsBuffer = ttsBuffer.slice(end).trimStart();
       if (seg) { ttsTextQueue.push(seg); processTTSPipeline(); }
     } else if (ttsBuffer.length > TTS_MAX_SEGMENT) {
@@ -806,7 +812,7 @@ function tryFlushTTSBuffer() {
       if (cut < TTS_MIN_SEGMENT) cut = ttsBuffer.lastIndexOf('、', TTS_MAX_SEGMENT);
       if (cut < TTS_MIN_SEGMENT) cut = ttsBuffer.lastIndexOf(' ', TTS_MAX_SEGMENT);
       if (cut < TTS_MIN_SEGMENT) cut = TTS_MAX_SEGMENT;
-      const seg = ttsBuffer.slice(0, cut).trim();
+      const seg = stripEmoji(ttsBuffer.slice(0, cut));
       ttsBuffer = ttsBuffer.slice(cut).trimStart();
       if (seg) { ttsTextQueue.push(seg); processTTSPipeline(); }
     } else {
@@ -872,6 +878,7 @@ function playNextInQueue() {
 }
 
 async function playManual(text, btnEl) {
+  text = stripEmoji(text);
   if (!text) return;
   stopCurrentAudio();
   currentPlayingBtn = btnEl;
