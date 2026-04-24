@@ -178,9 +178,10 @@ body {
   background: #ccc;
   cursor: not-allowed;
 }
-.voice-btn {
+.input-area .voice-btn {
   width: 40px;
   height: 40px;
+  padding: 0;
   border-radius: 50%;
   border: none;
   background: #e8e8e8;
@@ -192,10 +193,10 @@ body {
   flex-shrink: 0;
   transition: background 0.15s, color 0.15s;
 }
-.voice-btn:hover {
+.input-area .voice-btn:hover {
   background: #d0d0d0;
 }
-.voice-btn.recording {
+.input-area .voice-btn.recording {
   background: #e53935;
   color: #fff;
   animation: pulse 1.2s infinite;
@@ -454,9 +455,10 @@ body {
     padding: 8px 14px;
     font-size: 14px;
   }
-  .voice-btn {
+  .input-area .voice-btn {
     width: 36px;
     height: 36px;
+    padding: 0;
   }
 
   .memories-panel {
