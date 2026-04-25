@@ -11,3 +11,6 @@ wheels/
 
 # Model weights
 models/
+
+# SQLite database
+data/eva.db
