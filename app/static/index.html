@@ -822,6 +822,7 @@ function stopCurrentAudio() {
   ttsIsPlaying = false;
   ttsIsSynthesizing = false;
   ttsBuffer = '';
+  vadLastTtsEnd = Date.now();
   if (currentPlayingBtn) {
     currentPlayingBtn.classList.remove('playing');
     currentPlayingBtn = null;
@@ -883,6 +884,7 @@ async function processTTSPipeline() {
 function playNextInQueue() {
   if (ttsAudioQueue.length === 0) {
     ttsIsPlaying = false;
+    vadLastTtsEnd = Date.now();
     if (autoPlayTargetBtn) {
       autoPlayTargetBtn.classList.remove('playing');
       autoPlayTargetBtn = null;
@@ -890,10 +892,6 @@ function playNextInQueue() {
     return;
   }
   ttsIsPlaying = true;
-  // Stop seamless recording so TTS doesn't trigger false VAD
-  if (vadRecorder && vadRecorder.state === 'recording') {
-    try { vadRecorder.stop(); } catch (e) {}
-  }
   const item = ttsAudioQueue.shift();
   if (autoPlayTargetBtn) autoPlayTargetBtn.classList.add('playing');
   currentAudio = new Audio(item.url);
@@ -918,10 +916,6 @@ async function playManual(text, btnEl) {
   text = stripEmoji(text);
   if (!text) return;
   stopCurrentAudio();
-  // Stop seamless recording so TTS doesn't trigger false VAD
-  if (vadRecorder && vadRecorder.state === 'recording') {
-    try { vadRecorder.stop(); } catch (e) {}
-  }
   currentPlayingBtn = btnEl;
   if (btnEl) btnEl.classList.add('playing');
   try {
@@ -1014,8 +1008,23 @@ function stopSeamlessVoice() {
   vadSilenceStart = null;
 }
 
+let vadLastTtsEnd = 0;
+const VAD_TTS_COOLDOWN = 600;
+
 function runVAD() {
-  if (!vadAnalyser || ttsIsPlaying) return;
+  if (!vadAnalyser) return;
+
+  // Don't start recording while TTS is playing or just finished
+  if (ttsIsPlaying || Date.now() - vadLastTtsEnd < VAD_TTS_COOLDOWN) {
+    if (vadIsSpeech) {
+      vadIsSpeech = false;
+      vadSilenceStart = null;
+      if (vadRecorder && vadRecorder.state === 'recording') {
+        vadRecorder.stop();
+      }
+    }
+    return;
+  }
 
   const dataArray = new Uint8Array(vadAnalyser.fftSize);
   vadAnalyser.getByteTimeDomainData(dataArray);
