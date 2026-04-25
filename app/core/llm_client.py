@@ -95,8 +95,9 @@ class LLMClient:
         short_reply = assistant_reply[:200] if len(assistant_reply) > 200 else assistant_reply
         prompt = (
             "从以下用户消息中提取值得长期记住的重要信息（如名字、喜好、工作、重要事件等）。\n"
-            "每行一个，格式：事实内容 | 分类\n"
+            "每行一个，格式：事实内容 | 分类 | 重要性(1-10)\n"
             "分类可选：喜好、生活、关系、工作、情绪、其他\n"
+            "重要性：1=微不足道，10=极其重要\n"
             "如果没有则只回复：无\n"
             "只输出列表，不要解释。\n\n"
             f"用户消息：{user_msg}\n"
@@ -119,13 +120,20 @@ class LLMClient:
                 if not line or line == "无":
                     continue
                 if "|" in line:
-                    parts = line.split("|", 1)
+                    parts = line.split("|")
                     fact = parts[0].strip().lstrip("-").strip()
-                    category = parts[1].strip()
+                    category = parts[1].strip() if len(parts) > 1 else "其他"
+                    importance = 5
+                    if len(parts) > 2:
+                        try:
+                            importance = int(parts[2].strip())
+                            importance = max(1, min(10, importance))
+                        except ValueError:
+                            importance = 5
                     if fact:
-                        results.append({"fact": fact, "category": category})
+                        results.append({"fact": fact, "category": category, "importance": importance})
                 else:
-                    results.append({"fact": line.lstrip("-").strip(), "category": "其他"})
+                    results.append({"fact": line.lstrip("-").strip(), "category": "其他", "importance": 5})
             return results[:3]
         except Exception:
             pass

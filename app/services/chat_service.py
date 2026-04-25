@@ -78,12 +78,13 @@ class ChatService:
             for item in extracted:
                 fact = item.get("fact", "")
                 category = item.get("category", "其他")
+                importance = item.get("importance", 5)
                 if fact:
                     await memory_engine.add_memory(
                         session_id=session_id,
                         fact_text=fact,
                         category=category,
-                        importance_score=5,
+                        importance_score=importance,
                     )
         except Exception:
             pass
@@ -138,12 +139,13 @@ class ChatService:
             for item in extracted:
                 fact = item.get("fact", "")
                 category = item.get("category", "其他")
+                importance = item.get("importance", 5)
                 if fact:
                     await memory_engine.add_memory(
                         session_id=session_id,
                         fact_text=fact,
                         category=category,
-                        importance_score=5,
+                        importance_score=importance,
                     )
         except Exception:
             pass

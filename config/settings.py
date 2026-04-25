@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # Memory
     max_context_messages: int = 20
     db_path: str = "./data/eva.db"
+    max_memories_in_context: int = 10
+    memory_candidate_pool: int = 50
 
     # Persona
     default_persona_path: str = "./config/default_persona.yaml"
