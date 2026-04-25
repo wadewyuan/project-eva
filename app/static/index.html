@@ -835,6 +835,9 @@ let ttsAudioQueue = [];
 let ttsIsSynthesizing = false;
 let ttsIsPlaying = false;
 let autoPlayTargetBtn = null;
+let ttsAudioContext = null;
+let ttsNextStartTime = 0;
+let ttsActiveSources = [];
 
 const SENTENCE_END_RE = /[。！？.!?…]+/;
 const TTS_MIN_SEGMENT = 20;
@@ -845,15 +848,27 @@ function stripEmoji(text) {
   return text.replace(EMOJI_RE, '').trim();
 }
 
+function getTTSAudioContext() {
+  if (!ttsAudioContext) {
+    ttsAudioContext = new AudioContext();
+  }
+  if (ttsAudioContext.state === 'suspended') {
+    ttsAudioContext.resume();
+  }
+  return ttsAudioContext;
+}
+
 function stopCurrentAudio() {
+  for (const s of ttsActiveSources) {
+    try { s.stop(); } catch (e) {}
+  }
+  ttsActiveSources = [];
+  ttsNextStartTime = 0;
   if (currentAudio) {
     currentAudio.pause();
     currentAudio.onended = null;
     currentAudio.onerror = null;
     currentAudio = null;
-  }
-  for (const item of ttsAudioQueue) {
-    if (item.url) URL.revokeObjectURL(item.url);
   }
   ttsAudioQueue = [];
   ttsTextQueue = [];
@@ -907,47 +922,52 @@ async function processTTSPipeline() {
         });
         if (!res.ok) continue;
         const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        ttsAudioQueue.push({ url });
-        if (!ttsIsPlaying) playNextInQueue();
+        const arrayBuffer = await blob.arrayBuffer();
+        const audioBuffer = await getTTSAudioContext().decodeAudioData(arrayBuffer);
+        ttsAudioQueue.push({ buffer: audioBuffer });
+        scheduleTTSPlayback();
       } catch (e) {}
     }
   } finally {
     ttsIsSynthesizing = false;
-    // If new text arrived while we were synthesizing, drain again
     if (ttsTextQueue.length > 0) processTTSPipeline();
   }
 }
 
-function playNextInQueue() {
-  if (ttsAudioQueue.length === 0) {
-    ttsIsPlaying = false;
-    vadLastTtsEnd = Date.now();
-    if (autoPlayTargetBtn) {
-      autoPlayTargetBtn.classList.remove('playing');
-      autoPlayTargetBtn = null;
+function scheduleTTSPlayback() {
+  const ctx = getTTSAudioContext();
+  while (ttsAudioQueue.length > 0) {
+    const item = ttsAudioQueue[0];
+    if (!item.buffer) break;
+    ttsAudioQueue.shift();
+
+    const source = ctx.createBufferSource();
+    source.buffer = item.buffer;
+    source.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    if (ttsNextStartTime < now) {
+      ttsNextStartTime = now;
     }
-    return;
+
+    source.onended = () => {
+      ttsActiveSources = ttsActiveSources.filter(s => s !== source);
+      if (ttsActiveSources.length === 0) {
+        ttsIsPlaying = false;
+        vadLastTtsEnd = Date.now();
+        if (autoPlayTargetBtn) {
+          autoPlayTargetBtn.classList.remove('playing');
+          autoPlayTargetBtn = null;
+        }
+      }
+    };
+
+    source.start(ttsNextStartTime);
+    ttsNextStartTime += item.buffer.duration;
+    ttsIsPlaying = true;
+    ttsActiveSources.push(source);
+    if (autoPlayTargetBtn) autoPlayTargetBtn.classList.add('playing');
   }
-  ttsIsPlaying = true;
-  const item = ttsAudioQueue.shift();
-  if (autoPlayTargetBtn) autoPlayTargetBtn.classList.add('playing');
-  currentAudio = new Audio(item.url);
-  currentAudio.onended = () => {
-    URL.revokeObjectURL(item.url);
-    currentAudio = null;
-    playNextInQueue();
-  };
-  currentAudio.onerror = () => {
-    URL.revokeObjectURL(item.url);
-    currentAudio = null;
-    playNextInQueue();
-  };
-  currentAudio.play().catch(() => {
-    URL.revokeObjectURL(item.url);
-    currentAudio = null;
-    playNextInQueue();
-  });
 }
 
 async function playManual(text, btnEl) {
