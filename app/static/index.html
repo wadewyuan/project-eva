@@ -201,6 +201,18 @@ body {
   color: #fff;
   animation: pulse 1.2s infinite;
 }
+.input-area .voice-btn.seamless {
+  background: #4caf50;
+  color: #fff;
+}
+.input-area .voice-btn.listening {
+  animation: breathe 2.5s infinite;
+}
+@keyframes breathe {
+  0% { box-shadow: 0 0 0 0 rgba(76,175,80,0.45); }
+  50% { box-shadow: 0 0 0 10px rgba(76,175,80,0); }
+  100% { box-shadow: 0 0 0 0 rgba(76,175,80,0); }
+}
 @keyframes pulse {
   0% { box-shadow: 0 0 0 0 rgba(229,57,53,0.5); }
   70% { box-shadow: 0 0 0 10px rgba(229,57,53,0); }
@@ -528,6 +540,10 @@ body {
         <input type="checkbox" id="autoPlayToggle" onchange="saveAutoPlaySetting()">
         <span>自动朗读</span>
       </label>
+      <label class="auto-play-toggle" title="检测到语音自动输入">
+        <input type="checkbox" id="seamlessVoiceToggle" onchange="toggleSeamlessVoice()">
+        <span>连续语音</span>
+      </label>
       <button class="toggle-btn" onclick="toggleMemories()">记忆</button>
     </div>
   </div>
@@ -757,6 +773,23 @@ let isRecording = false;
 let currentAudio = null;
 let currentPlayingBtn = null;
 
+// Seamless voice mode (VAD)
+let seamlessMode = false;
+let vadAudioContext = null;
+let vadAnalyser = null;
+let vadStream = null;
+let vadInterval = null;
+let vadRecorder = null;
+let vadChunks = [];
+let vadSpeechStartTime = null;
+let vadIsSpeech = false;
+let vadSilenceStart = null;
+
+const VAD_THRESHOLD = 0.018;
+const SILENCE_TIMEOUT = 1400;
+const MIN_SPEECH_MS = 500;
+const VAD_POLL_MS = 50;
+
 // Streamed TTS pipeline: text -> [synthesize] -> audio -> [play]
 let ttsBuffer = '';
 let ttsTextQueue = [];
@@ -857,6 +890,10 @@ function playNextInQueue() {
     return;
   }
   ttsIsPlaying = true;
+  // Stop seamless recording so TTS doesn't trigger false VAD
+  if (vadRecorder && vadRecorder.state === 'recording') {
+    try { vadRecorder.stop(); } catch (e) {}
+  }
   const item = ttsAudioQueue.shift();
   if (autoPlayTargetBtn) autoPlayTargetBtn.classList.add('playing');
   currentAudio = new Audio(item.url);
@@ -881,6 +918,10 @@ async function playManual(text, btnEl) {
   text = stripEmoji(text);
   if (!text) return;
   stopCurrentAudio();
+  // Stop seamless recording so TTS doesn't trigger false VAD
+  if (vadRecorder && vadRecorder.state === 'recording') {
+    try { vadRecorder.stop(); } catch (e) {}
+  }
   currentPlayingBtn = btnEl;
   if (btnEl) btnEl.classList.add('playing');
   try {
@@ -907,8 +948,170 @@ async function playManual(text, btnEl) {
   }
 }
 
+function toggleSeamlessVoice() {
+  const cb = document.getElementById('seamlessVoiceToggle');
+  seamlessMode = cb.checked;
+  localStorage.setItem('eva_seamless_voice', seamlessMode);
+  if (seamlessMode) {
+    startSeamlessVoice();
+  } else {
+    stopSeamlessVoice();
+  }
+}
+
+async function startSeamlessVoice() {
+  const btn = document.getElementById('micBtn');
+  btn.classList.add('seamless');
+  btn.title = '连续语音开启中，点击关闭';
+
+  try {
+    vadStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true }
+    });
+    vadAudioContext = new AudioContext();
+    const source = vadAudioContext.createMediaStreamSource(vadStream);
+    vadAnalyser = vadAudioContext.createAnalyser();
+    vadAnalyser.fftSize = 2048;
+    source.connect(vadAnalyser);
+
+    vadIsSpeech = false;
+    vadSilenceStart = null;
+    btn.classList.add('listening');
+
+    vadInterval = setInterval(runVAD, VAD_POLL_MS);
+  } catch (err) {
+    console.error('Failed to start seamless voice:', err);
+    alert('无法访问麦克风: ' + (err.message || err.name));
+    document.getElementById('seamlessVoiceToggle').checked = false;
+    seamlessMode = false;
+    btn.classList.remove('seamless', 'listening');
+    btn.title = '语音输入';
+  }
+}
+
+function stopSeamlessVoice() {
+  const btn = document.getElementById('micBtn');
+  btn.classList.remove('seamless', 'listening', 'recording');
+  btn.title = '语音输入';
+
+  if (vadInterval) {
+    clearInterval(vadInterval);
+    vadInterval = null;
+  }
+  if (vadRecorder && vadRecorder.state === 'recording') {
+    try { vadRecorder.stop(); } catch (e) {}
+  }
+  if (vadAudioContext) {
+    vadAudioContext.close();
+    vadAudioContext = null;
+  }
+  if (vadStream) {
+    vadStream.getTracks().forEach(t => t.stop());
+    vadStream = null;
+  }
+  vadAnalyser = null;
+  vadIsSpeech = false;
+  vadSilenceStart = null;
+}
+
+function runVAD() {
+  if (!vadAnalyser || ttsIsPlaying) return;
+
+  const dataArray = new Uint8Array(vadAnalyser.fftSize);
+  vadAnalyser.getByteTimeDomainData(dataArray);
+
+  let sum = 0;
+  for (let i = 0; i < dataArray.length; i++) {
+    const x = (dataArray[i] - 128) / 128.0;
+    sum += x * x;
+  }
+  const rms = Math.sqrt(sum / dataArray.length);
+  const now = Date.now();
+
+  if (rms > VAD_THRESHOLD) {
+    if (!vadIsSpeech) {
+      vadIsSpeech = true;
+      vadSilenceStart = null;
+      startSeamlessRecorder();
+    }
+  } else if (vadIsSpeech) {
+    if (!vadSilenceStart) vadSilenceStart = now;
+    if (now - vadSilenceStart > SILENCE_TIMEOUT) {
+      vadIsSpeech = false;
+      if (vadRecorder && vadRecorder.state === 'recording') {
+        vadRecorder.stop();
+      }
+    }
+  }
+}
+
+function startSeamlessRecorder() {
+  const btn = document.getElementById('micBtn');
+  btn.classList.remove('listening');
+  btn.classList.add('recording');
+
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+  vadRecorder = new MediaRecorder(vadStream, mimeType ? { mimeType } : {});
+  vadChunks = [];
+  vadSpeechStartTime = Date.now();
+
+  vadRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) vadChunks.push(e.data);
+  };
+
+  vadRecorder.onstop = async () => {
+    btn.classList.remove('recording');
+    if (seamlessMode) btn.classList.add('listening');
+
+    const duration = Date.now() - vadSpeechStartTime;
+    if (duration < MIN_SPEECH_MS || vadChunks.length === 0) return;
+
+    const blob = new Blob(vadChunks, { type: vadRecorder.mimeType || 'audio/webm' });
+    await sendSeamlessTranscription(blob);
+  };
+
+  vadRecorder.start(100);
+}
+
+async function sendSeamlessTranscription(blob) {
+  const formData = new FormData();
+  formData.append('audio', blob, 'recording.webm');
+
+  const input = document.getElementById('input');
+  const oldPlaceholder = input.placeholder;
+  input.placeholder = '识别中...';
+
+  try {
+    const res = await fetch('/voice/transcribe', { method: 'POST', body: formData });
+    if (!res.ok) throw new Error('识别失败');
+    const data = await res.json();
+    const text = data.text || '';
+    if (text) {
+      input.value = text;
+      if (!isStreaming) {
+        sendMessage();
+      }
+    }
+  } catch (err) {
+    input.placeholder = '识别出错';
+    setTimeout(() => { input.placeholder = oldPlaceholder; }, 2000);
+  } finally {
+    input.placeholder = oldPlaceholder;
+  }
+}
+
 async function toggleRecording() {
   const btn = document.getElementById('micBtn');
+
+  // If seamless mode is active, clicking mic turns it off
+  if (seamlessMode) {
+    document.getElementById('seamlessVoiceToggle').checked = false;
+    toggleSeamlessVoice();
+    return;
+  }
+
   if (isRecording) {
     mediaRecorder.stop();
     isRecording = false;
@@ -917,7 +1120,9 @@ async function toggleRecording() {
   }
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true }
+    });
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
       : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
@@ -967,9 +1172,17 @@ function loadAutoPlaySetting() {
   toggle.checked = localStorage.getItem('eva_auto_play') === 'true';
 }
 
+function loadSeamlessVoiceSetting() {
+  const toggle = document.getElementById('seamlessVoiceToggle');
+  const saved = localStorage.getItem('eva_seamless_voice') === 'true';
+  toggle.checked = saved;
+  if (saved) toggleSeamlessVoice();
+}
+
 // Welcome message
 appendMessage('assistant', '嗨，我是小夏。想聊点什么？');
 loadAutoPlaySetting();
+loadSeamlessVoiceSetting();
 </script>
 </body>
 </html>
