@@ -364,6 +364,14 @@ body {
   font-size: 13px;
   color: #555;
   border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+.memory-item .memory-content {
+  flex: 1;
+  min-width: 0;
 }
 .memory-item .fact {
   color: #333;
@@ -372,6 +380,20 @@ body {
   font-size: 11px;
   color: #999;
   margin-top: 2px;
+}
+.memory-item .del-btn {
+  background: none;
+  border: none;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  transition: color 0.15s;
+  flex-shrink: 0;
+}
+.memory-item .del-btn:hover {
+  color: #e53935;
 }
 .empty-state {
   text-align: center;
@@ -735,8 +757,11 @@ async function refreshMemories() {
     }
     container.innerHTML = memories.map(m => `
       <div class="memory-item">
-        <div class="fact">${m.fact_text}</div>
-        <div class="meta">${m.category} · ${new Date(m.created_at).toLocaleString()}</div>
+        <div class="memory-content">
+          <div class="fact">${m.fact_text}</div>
+          <div class="meta">${m.category} · ${new Date(m.created_at).toLocaleString()}</div>
+        </div>
+        <button class="del-btn" onclick="deleteMemory(${m.id})" title="删除">×</button>
       </div>
     `).join('');
   } catch (err) {
@@ -762,6 +787,19 @@ async function doClearMemories() {
     }
   } catch (err) {
     alert('清除失败，请重试');
+  }
+}
+
+async function deleteMemory(id) {
+  if (!confirm('确定删除这条记忆？')) return;
+  try {
+    const res = await fetch(`/memories/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.ok) {
+      refreshMemories();
+    }
+  } catch (err) {
+    alert('删除失败，请重试');
   }
 }
 
