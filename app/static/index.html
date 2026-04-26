@@ -1100,6 +1100,8 @@ function runVAD() {
       vadIsSpeech = true;
       vadSilenceStart = null;
       startSeamlessRecorder();
+    } else {
+      vadSilenceStart = null;
     }
   } else if (vadIsSpeech) {
     if (!vadSilenceStart) vadSilenceStart = now;
