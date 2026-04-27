@@ -8,12 +8,20 @@ class EmbeddingModel:
     """Lightweight wrapper around fastembed for Chinese text embeddings."""
 
     def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5") -> None:
-        self.model = TextEmbedding(model_name)
-        self.dim: int = self.model.embedding_size
+        self._model_name = model_name
+        self._model = None
+        self.dim: int = 512  # bge-small-zh-v1.5 dimension
+
+    def _load(self):
+        if self._model is None:
+            self._model = TextEmbedding(self._model_name)
+            self.dim = self._model.embedding_size
+        return self._model
 
     def encode(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts. Returns list of float vectors."""
-        return [list(vec) for vec in self.model.embed(texts)]
+        model = self._load()
+        return [list(vec) for vec in model.embed(texts)]
 
     def encode_one(self, text: str) -> list[float]:
         """Embed a single text."""

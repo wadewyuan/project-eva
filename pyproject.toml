@@ -20,4 +20,5 @@ dependencies = [
     "pyyaml>=6.0.3",
     "qwen-asr>=0.0.6",
     "uvicorn>=0.45.0",
+    "websockets>=14.0",
 ]

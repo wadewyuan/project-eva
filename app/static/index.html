@@ -811,22 +811,62 @@ let isRecording = false;
 let currentAudio = null;
 let currentPlayingBtn = null;
 
-// Seamless voice mode (VAD)
+// Seamless voice mode (raw PCM streaming)
 let seamlessMode = false;
 let vadAudioContext = null;
 let vadAnalyser = null;
 let vadStream = null;
 let vadInterval = null;
-let vadRecorder = null;
-let vadChunks = [];
-let vadSpeechStartTime = null;
 let vadIsSpeech = false;
 let vadSilenceStart = null;
 
+let pcmAudioContext = null;
+let pcmProcessor = null;
+let pcmSource = null;
+let pcmBuffer = new Float32Array(0);
+let pcmChunkTimer = null;
+
+// WebSocket streaming ASR state
+let streamWs = null;
+let streamPrefix = '';
+let streamIsFinalizing = false;
+
 const VAD_THRESHOLD = 0.018;
-const SILENCE_TIMEOUT = 2000;
-const MIN_SPEECH_MS = 500;
+const SILENCE_TIMEOUT = 3000;
+const CHUNK_MS = 500;
+const TARGET_SR = 16000;
 const VAD_POLL_MS = 50;
+
+function resampleLinear(input, srcSr, dstSr) {
+  if (srcSr === dstSr) return input;
+  const ratio = dstSr / srcSr;
+  const outLen = Math.max(0, Math.round(input.length * ratio));
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const x = i / ratio;
+    const x0 = Math.floor(x);
+    const x1 = Math.min(x0 + 1, input.length - 1);
+    const t = x - x0;
+    out[i] = input[x0] * (1 - t) + input[x1] * t;
+  }
+  return out;
+}
+
+function concatFloat32(a, b) {
+  const out = new Float32Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function float32ToPCM16(float32Array) {
+  const pcm16 = new Int16Array(float32Array.length);
+  for (let i = 0; i < float32Array.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return pcm16.buffer;
+}
 
 // Streamed TTS pipeline: text -> [synthesize] -> audio -> [play]
 let ttsBuffer = '';
@@ -1020,14 +1060,32 @@ async function startSeamlessVoice() {
     vadStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true }
     });
+
+    // VAD audio context (for speech detection)
     vadAudioContext = new AudioContext();
-    const source = vadAudioContext.createMediaStreamSource(vadStream);
+    const vadSource = vadAudioContext.createMediaStreamSource(vadStream);
     vadAnalyser = vadAudioContext.createAnalyser();
     vadAnalyser.fftSize = 2048;
-    source.connect(vadAnalyser);
+    vadSource.connect(vadAnalyser);
+
+    // PCM capture audio context (for streaming to ASR)
+    pcmAudioContext = new AudioContext();
+    pcmSource = pcmAudioContext.createMediaStreamSource(vadStream);
+    pcmProcessor = pcmAudioContext.createScriptProcessor(4096, 1, 1);
+    pcmProcessor.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      const resampled = resampleLinear(input, pcmAudioContext.sampleRate, TARGET_SR);
+      pcmBuffer = concatFloat32(pcmBuffer, resampled);
+    };
+    pcmSource.connect(pcmProcessor);
+    pcmProcessor.connect(pcmAudioContext.destination);
 
     vadIsSpeech = false;
     vadSilenceStart = null;
+    streamWs = null;
+    streamPrefix = '';
+    streamIsFinalizing = false;
+    pcmBuffer = new Float32Array(0);
     btn.classList.add('listening');
 
     vadInterval = setInterval(runVAD, VAD_POLL_MS);
@@ -1050,8 +1108,22 @@ function stopSeamlessVoice() {
     clearInterval(vadInterval);
     vadInterval = null;
   }
-  if (vadRecorder && vadRecorder.state === 'recording') {
-    try { vadRecorder.stop(); } catch (e) {}
+  if (pcmChunkTimer) {
+    clearInterval(pcmChunkTimer);
+    pcmChunkTimer = null;
+  }
+  if (pcmProcessor) {
+    pcmProcessor.disconnect();
+    pcmProcessor.onaudioprocess = null;
+    pcmProcessor = null;
+  }
+  if (pcmSource) {
+    pcmSource.disconnect();
+    pcmSource = null;
+  }
+  if (pcmAudioContext) {
+    pcmAudioContext.close();
+    pcmAudioContext = null;
   }
   if (vadAudioContext) {
     vadAudioContext.close();
@@ -1064,12 +1136,19 @@ function stopSeamlessVoice() {
   vadAnalyser = null;
   vadIsSpeech = false;
   vadSilenceStart = null;
+  pcmBuffer = new Float32Array(0);
+  streamIsFinalizing = false;
+  if (streamWs) {
+    try { streamWs.close(); } catch (e) {}
+    streamWs = null;
+  }
+  streamPrefix = '';
 }
 
 let vadLastTtsEnd = 0;
 const VAD_TTS_COOLDOWN = 600;
 
-function runVAD() {
+async function runVAD() {
   if (!vadAnalyser) return;
 
   // Don't start recording while TTS is playing or just finished
@@ -1077,9 +1156,7 @@ function runVAD() {
     if (vadIsSpeech) {
       vadIsSpeech = false;
       vadSilenceStart = null;
-      if (vadRecorder && vadRecorder.state === 'recording') {
-        vadRecorder.stop();
-      }
+      finalizeStream();
     }
     return;
   }
@@ -1099,7 +1176,30 @@ function runVAD() {
     if (!vadIsSpeech) {
       vadIsSpeech = true;
       vadSilenceStart = null;
-      startSeamlessRecorder();
+      // Open WebSocket for streaming ASR
+      if (!streamWs) {
+        try {
+          const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          streamWs = new WebSocket(`${proto}//${window.location.host}/voice/stream`);
+          streamPrefix = document.getElementById('input').value.trim();
+          streamWs.onmessage = (evt) => {
+            try {
+              const msg = JSON.parse(evt.data);
+              if (msg.type === 'partial') {
+                const input = document.getElementById('input');
+                const sep = streamPrefix && msg.text ? ' ' : '';
+                input.value = streamPrefix + sep + (msg.text || '');
+              }
+            } catch (e) {}
+          };
+          streamWs.onerror = (err) => {
+            console.error('ASR WebSocket error:', err);
+          };
+        } catch (err) {
+          console.error('ASR WebSocket open error:', err);
+        }
+      }
+      startPCMStreaming();
     } else {
       vadSilenceStart = null;
     }
@@ -1107,68 +1207,94 @@ function runVAD() {
     if (!vadSilenceStart) vadSilenceStart = now;
     if (now - vadSilenceStart > SILENCE_TIMEOUT) {
       vadIsSpeech = false;
-      if (vadRecorder && vadRecorder.state === 'recording') {
-        vadRecorder.stop();
-      }
+      vadSilenceStart = null;
+      finalizeStream();
     }
   }
 }
 
-function startSeamlessRecorder() {
-  const btn = document.getElementById('micBtn');
-  btn.classList.remove('listening');
-  btn.classList.add('recording');
-
-  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ? 'audio/webm;codecs=opus'
-    : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
-  vadRecorder = new MediaRecorder(vadStream, mimeType ? { mimeType } : {});
-  vadChunks = [];
-  vadSpeechStartTime = Date.now();
-
-  vadRecorder.ondataavailable = (e) => {
-    if (e.data.size > 0) vadChunks.push(e.data);
-  };
-
-  vadRecorder.onstop = async () => {
-    btn.classList.remove('recording');
-    if (seamlessMode) btn.classList.add('listening');
-
-    const duration = Date.now() - vadSpeechStartTime;
-    if (duration < MIN_SPEECH_MS || vadChunks.length === 0) return;
-
-    const blob = new Blob(vadChunks, { type: vadRecorder.mimeType || 'audio/webm' });
-    await sendSeamlessTranscription(blob);
-  };
-
-  vadRecorder.start(100);
+function startPCMStreaming() {
+  const chunkSamples = Math.round(TARGET_SR * (CHUNK_MS / 1000));
+  pcmChunkTimer = setInterval(() => {
+    if (!seamlessMode || streamIsFinalizing) return;
+    while (pcmBuffer.length >= chunkSamples) {
+      const chunk = pcmBuffer.slice(0, chunkSamples);
+      pcmBuffer = pcmBuffer.slice(chunkSamples);
+      if (streamWs && streamWs.readyState === WebSocket.OPEN) {
+        try {
+          streamWs.send(float32ToPCM16(chunk));
+        } catch (err) {
+          console.error('WebSocket send error:', err);
+        }
+      }
+    }
+  }, CHUNK_MS / 2);
 }
 
-async function sendSeamlessTranscription(blob) {
-  const formData = new FormData();
-  formData.append('audio', blob, 'recording.webm');
+async function finalizeStream() {
+  if (streamIsFinalizing) return;
+  streamIsFinalizing = true;
 
+  if (pcmChunkTimer) {
+    clearInterval(pcmChunkTimer);
+    pcmChunkTimer = null;
+  }
+
+  // Flush remaining audio
+  if (pcmBuffer.length > 0 && streamWs && streamWs.readyState === WebSocket.OPEN) {
+    try {
+      streamWs.send(float32ToPCM16(new Float32Array(pcmBuffer)));
+    } catch (err) {
+      console.error('WebSocket flush error:', err);
+    }
+    pcmBuffer = new Float32Array(0);
+  }
+
+  // Request final transcription and wait for result
+  let finalText = '';
+  if (streamWs && streamWs.readyState === WebSocket.OPEN) {
+    try {
+      finalText = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Final transcription timeout')), 10000);
+        const onMessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            if (msg.type === 'final') {
+              clearTimeout(timeout);
+              streamWs.removeEventListener('message', onMessage);
+              resolve(msg.text || '');
+            } else if (msg.type === 'error') {
+              clearTimeout(timeout);
+              streamWs.removeEventListener('message', onMessage);
+              reject(new Error(msg.message));
+            }
+          } catch (e) {}
+        };
+        streamWs.addEventListener('message', onMessage);
+        streamWs.send('final');
+      });
+    } catch (err) {
+      console.error('ASR final error:', err);
+    }
+    try { streamWs.close(); } catch (e) {}
+    streamWs = null;
+  }
+
+  // Update input with the final text
   const input = document.getElementById('input');
-  const oldPlaceholder = input.placeholder;
-  input.placeholder = '识别中...';
+  const sep = streamPrefix && finalText ? ' ' : '';
+  input.value = streamPrefix + sep + finalText;
 
-  try {
-    const res = await fetch('/voice/transcribe', { method: 'POST', body: formData });
-    if (!res.ok) throw new Error('识别失败');
-    const data = await res.json();
-    const text = data.text || '';
-    if (text) {
-      input.value = text;
-      if (!isStreaming) {
-        sendMessage();
-      }
-    }
-  } catch (err) {
-    input.placeholder = '识别出错';
-    setTimeout(() => { input.placeholder = oldPlaceholder; }, 2000);
-  } finally {
-    input.placeholder = oldPlaceholder;
+  if (vadIsSpeech) return;
+
+  const text = input.value.trim();
+  if (text && !isStreaming) {
+    sendMessage();
   }
+
+  // Reset state for next utterance
+  streamPrefix = '';
+  streamIsFinalizing = false;
 }
 
 async function toggleRecording() {
