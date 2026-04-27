@@ -33,16 +33,6 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             tmp_path.unlink()
 
 
-@router.post("/transcribe_pcm", response_model=VoiceTranscribeResponse)
-async def transcribe_pcm(request: Request):
-    audio_bytes = await request.body()
-    if len(audio_bytes) == 0:
-        raise HTTPException(status_code=400, detail="Empty audio data")
-    wav = np.frombuffer(audio_bytes, dtype=np.float32)
-    text = await voice_service.transcribe_pcm(wav)
-    return VoiceTranscribeResponse(text=text)
-
-
 @router.post("/synthesize")
 async def synthesize_text(req: VoiceSynthesizeRequest):
     tmp_path = None

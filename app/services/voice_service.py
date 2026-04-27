@@ -96,19 +96,6 @@ class VoiceService:
         text = await asyncio.get_event_loop().run_in_executor(self._executor, _do_transcribe)
         return text.strip()
 
-    async def transcribe_pcm(self, wav: np.ndarray, sr: int = 16000) -> str:
-        model = self._load_model()
-
-        def _do_transcribe():
-            results = model.transcribe(
-                audio=(wav, sr),
-                language=None,
-            )
-            return results[0].text if results else ""
-
-        text = await asyncio.get_event_loop().run_in_executor(self._executor, _do_transcribe)
-        return text.strip()
-
     # ------------------------------------------------------------------
     # Streaming transcription (real-time)
     # ------------------------------------------------------------------
