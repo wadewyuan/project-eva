@@ -101,6 +101,20 @@ body {
   color: #1976D2;
   white-space: nowrap;
 }
+.persona-select {
+  font-size: 14px;
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fff;
+  color: #333;
+  outline: none;
+  cursor: pointer;
+  max-width: 140px;
+}
+.persona-select:focus {
+  border-color: #2196F3;
+}
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -554,7 +568,8 @@ body {
       <button class="hamburger" onclick="openSidebar()">
         <span></span><span></span><span></span>
       </button>
-      <span class="title">小夏</span>
+      <span class="title" id="personaTitle">小夏</span>
+      <select class="persona-select" id="personaSelect" onchange="onPersonaChange(this.value)"></select>
     </div>
     <div style="display:flex;align-items:center;gap:8px">
       <span class="tone-badge" id="toneBadge" style="display:none">默认</span>
@@ -608,6 +623,8 @@ body {
 <script>
 let sessionId = null;
 let isStreaming = false;
+let allPersonas = [];
+let currentPersona = null;
 
 function openSidebar() {
   document.getElementById('sidebar').classList.add('open');
@@ -617,6 +634,71 @@ function openSidebar() {
 function closeSidebar() {
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sidebarOverlay').classList.remove('active');
+}
+
+async function loadPersonas() {
+  try {
+    const res = await fetch('/personas');
+    allPersonas = await res.json();
+    const select = document.getElementById('personaSelect');
+    select.innerHTML = '';
+    let active = null;
+    for (const p of allPersonas) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      if (p.is_active) {
+        opt.selected = true;
+        active = p;
+      }
+      select.appendChild(opt);
+    }
+    if (active) {
+      currentPersona = active;
+      document.getElementById('personaTitle').textContent = active.name;
+      const container = document.getElementById('messages');
+      if (container.children.length === 0) {
+        const welcome = active.description
+          ? `嗨，我是${active.name}。${active.description}`
+          : `嗨，我是${active.name}。想聊点什么？`;
+        appendMessage('assistant', welcome);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load personas:', err);
+  }
+}
+
+async function onPersonaChange(personaId) {
+  const persona = allPersonas.find(p => p.id === personaId);
+  if (!persona) return;
+
+  try {
+    const res = await fetch('/personas/active?persona_id=' + encodeURIComponent(personaId), {
+      method: 'PUT'
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert('切换角色失败');
+      loadPersonas();
+      return;
+    }
+  } catch (err) {
+    alert('切换角色失败');
+    loadPersonas();
+    return;
+  }
+
+  currentPersona = persona;
+  document.getElementById('personaTitle').textContent = persona.name;
+
+  // Start fresh: new session, clear messages
+  sessionId = null;
+  document.getElementById('messages').innerHTML = '';
+  const welcome = persona.description
+    ? `嗨，我是${persona.name}。${persona.description}`
+    : `嗨，我是${persona.name}。想聊点什么？`;
+  appendMessage('assistant', welcome);
 }
 
 function switchTab(tab) {
@@ -1374,8 +1456,7 @@ function loadSeamlessVoiceSetting() {
   if (saved) toggleSeamlessVoice();
 }
 
-// Welcome message
-appendMessage('assistant', '嗨，我是小夏。想聊点什么？');
+loadPersonas();
 loadAutoPlaySetting();
 loadSeamlessVoiceSetting();
 </script>

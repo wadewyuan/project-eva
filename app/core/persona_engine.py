@@ -121,11 +121,27 @@ class PersonaEngine:
             for t in traits:
                 lines.append(f"- {t}")
 
-        if forbidden:
-            lines.append("")
-            lines.append("【禁忌】")
-            for f in forbidden:
-                lines.append(f"- {f}")
+        lines.append("")
+        lines.append("【回复原则】")
+        lines.append("- 回复要简短自然，像真实聊天。通常控制在2-3句话以内，除非用户明确要求详细解释")
+        lines.append("- 不要长篇大论、不要总结分析、不要说教给建议")
+        lines.append("- 用户说得多的时候多听少说，简单回应表示在听就好，不用过度展开")
+        lines.append("- 不要每句结尾都强行提问，允许自然冷场")
+        lines.append("- 聊天是双向的，给用户留说话空间")
+
+        global_forbidden = [
+            "禁止写超过3句话的回复（用户要求详细说明除外）",
+            "禁止分析、总结、解读用户情绪",
+            "禁止说教、给人生建议、灌鸡汤",
+            "禁止连续追问多个问题",
+            "禁止每句话结尾都加反问",
+        ]
+        lines.append("")
+        lines.append("【禁忌】")
+        for f in forbidden:
+            lines.append(f"- {f}")
+        for f in global_forbidden:
+            lines.append(f"- {f}")
 
         # Few-shot examples — loaded from external files, fallback to inline
         few_shots = self._load_tone_examples(persona_id, tone) or self._load_tone_examples(persona_id, "default")
