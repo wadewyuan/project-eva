@@ -121,6 +121,21 @@ class MemoryEngine:
                     "SELECT id, fact_text FROM memories"
                 )
                 await conn.commit()
+
+            # 6. Backfill embeddings for memories that don't have them
+            cursor = await conn.execute(
+                "SELECT id, fact_text FROM memories WHERE embedding IS NULL"
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                emb = await asyncio.to_thread(embedding_model.encode_one, row[1])
+                blob = embedding_model.vector_to_blob(emb)
+                await conn.execute(
+                    "UPDATE memories SET embedding = ? WHERE id = ?",
+                    (blob, row[0]),
+                )
+            if rows:
+                await conn.commit()
         finally:
             await conn.close()
 
@@ -337,6 +352,20 @@ class MemoryEngine:
 
         return scored
 
+    @staticmethod
+    def _format_memory(mem: dict) -> str:
+        """Format a memory for the LLM context, including its timestamp."""
+        fact = mem.get("fact_text", "")
+        created = mem.get("created_at", "")
+        if created:
+            try:
+                dt = datetime.fromisoformat(created)
+                date_str = dt.strftime("%Y-%m-%d")
+                return f"[{date_str}] {fact}"
+            except (ValueError, TypeError):
+                pass
+        return fact
+
     async def get_relevant_memories(
         self, session_id: str, query: str, limit: int | None = None
     ) -> list[str]:
@@ -405,7 +434,7 @@ class MemoryEngine:
             )
             scored.sort(key=lambda x: x[0], reverse=True)
 
-            return [mem["fact_text"] for _, mem in scored[:limit]]
+            return [self._format_memory(mem) for _, mem in scored[:limit]]
         finally:
             await conn.close()
 
