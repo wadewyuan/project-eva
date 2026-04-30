@@ -1,3 +1,4 @@
+import asyncio
 import re
 import uuid
 
@@ -66,18 +67,25 @@ class ChatService:
 
         return session_id, messages, tone
 
-    async def _save_and_extract_memories(
+    async def _save_turn(
+        self,
+        session_id: str,
+        assistant_reply: str,
+    ) -> None:
+        """Save assistant message and update session time."""
+        await memory_engine.add_message(session_id, "assistant", assistant_reply)
+        await memory_engine.update_session_time(session_id)
+
+    async def _extract_memories_task(
         self,
         session_id: str,
         user_message: str,
         assistant_reply: str,
     ) -> None:
-        """Save assistant message, update session time, and extract memories."""
-        await memory_engine.add_message(session_id, "assistant", assistant_reply)
-        await memory_engine.update_session_time(session_id)
-
+        """Background task: extract and store memories from a conversation turn."""
+        source_context = f"用户：{user_message}\n助手：{assistant_reply}"
         try:
-            extracted = await llm_client.extract_memories(user_message, assistant_reply)
+            extracted = await llm_client.extract_memories(user_message)
             for item in extracted:
                 fact = item.get("fact", "")
                 category = item.get("category", "其他")
@@ -88,9 +96,21 @@ class ChatService:
                         fact_text=fact,
                         category=category,
                         importance_score=importance,
+                        source_context=source_context,
                     )
         except Exception:
             pass
+
+    def _fire_extract_memories(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_reply: str,
+    ) -> None:
+        """Fire-and-forget background memory extraction."""
+        asyncio.create_task(
+            self._extract_memories_task(session_id, user_message, assistant_reply)
+        )
 
     async def chat(self, session_id: str | None, message: str) -> dict:
         session_id, messages, tone = await self._prepare_chat(session_id, message)
@@ -99,7 +119,8 @@ class ChatService:
         assert isinstance(reply, str)
 
         await memory_engine.add_message(session_id, "user", message)
-        await self._save_and_extract_memories(session_id, message, reply)
+        await self._save_turn(session_id, reply)
+        self._fire_extract_memories(session_id, message, reply)
 
         return {
             "session_id": session_id,
@@ -119,9 +140,9 @@ class ChatService:
             full_reply += chunk
             yield {"type": "token", "data": chunk}
 
-        await self._save_and_extract_memories(session_id, message, full_reply)
-
+        await self._save_turn(session_id, full_reply)
         yield {"type": "done", "session_id": session_id, "tone_detected": tone}
+        self._fire_extract_memories(session_id, message, full_reply)
 
 
 chat_service = ChatService()

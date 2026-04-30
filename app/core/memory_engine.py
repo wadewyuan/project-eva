@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS memories (
     category TEXT NOT NULL DEFAULT '其他',
     importance_score INTEGER NOT NULL DEFAULT 5,
     created_at TEXT NOT NULL,
-    embedding BLOB
+    embedding BLOB,
+    source_context TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
@@ -122,7 +123,14 @@ class MemoryEngine:
                 )
                 await conn.commit()
 
-            # 6. Backfill embeddings for memories that don't have them
+            # 6. Migrate: add source_context column if missing
+            cursor = await conn.execute("PRAGMA table_info(memories)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if "source_context" not in columns:
+                await conn.execute("ALTER TABLE memories ADD COLUMN source_context TEXT")
+                await conn.commit()
+
+            # 7. Backfill embeddings for memories that don't have them
             cursor = await conn.execute(
                 "SELECT id, fact_text FROM memories WHERE embedding IS NULL"
             )
@@ -231,17 +239,71 @@ class MemoryEngine:
 
     # ---------- Memories ----------
 
-    async def add_memory(self, session_id: str | None, fact_text: str, category: str = "其他", importance_score: int = 5) -> None:
+    async def _is_duplicate(
+        self,
+        session_id: str | None,
+        new_embedding: np.ndarray,
+        threshold: float = 0.88,
+    ) -> bool:
+        """Check if a very similar memory already exists in the session."""
+        conn = await self._connect()
+        try:
+            if session_id:
+                async with conn.execute(
+                    "SELECT embedding FROM memories WHERE session_id = ? ORDER BY created_at DESC LIMIT 50",
+                    (session_id,),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            else:
+                async with conn.execute(
+                    "SELECT embedding FROM memories ORDER BY created_at DESC LIMIT 50",
+                ) as cursor:
+                    rows = await cursor.fetchall()
+
+            new_vec = np.array(new_embedding, dtype=np.float32)
+            new_norm = np.linalg.norm(new_vec)
+            if new_norm == 0:
+                return False
+
+            for row in rows:
+                if row[0] is None:
+                    continue
+                mem_vec = np.frombuffer(row[0], dtype=np.float32)
+                if len(mem_vec) != len(new_vec):
+                    continue
+                mem_norm = np.linalg.norm(mem_vec)
+                if mem_norm == 0:
+                    continue
+                cosine = float(np.dot(new_vec, mem_vec) / (new_norm * mem_norm))
+                if cosine > threshold:
+                    return True
+            return False
+        finally:
+            await conn.close()
+
+    async def add_memory(
+        self,
+        session_id: str | None,
+        fact_text: str,
+        category: str = "其他",
+        importance_score: int = 5,
+        source_context: str | None = None,
+    ) -> None:
         now = datetime.utcnow().isoformat()
         # Compute embedding in a thread pool to avoid blocking the event loop
         embedding = await asyncio.to_thread(embedding_model.encode_one, fact_text)
+
+        # Skip if a nearly identical memory already exists (echo chamber guard)
+        if await self._is_duplicate(session_id, embedding):
+            return
+
         blob = embedding_model.vector_to_blob(embedding)
 
         conn = await self._connect()
         try:
             await conn.execute(
-                "INSERT INTO memories (session_id, fact_text, category, importance_score, created_at, embedding) VALUES (?, ?, ?, ?, ?, ?)",
-                (session_id, fact_text, category, importance_score, now, blob),
+                "INSERT INTO memories (session_id, fact_text, category, importance_score, created_at, embedding, source_context) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, fact_text, category, importance_score, now, blob, source_context),
             )
             await conn.commit()
         finally:
@@ -354,9 +416,15 @@ class MemoryEngine:
 
     @staticmethod
     def _format_memory(mem: dict) -> str:
-        """Format a memory for the LLM context, including its timestamp."""
+        """Format a memory for the LLM context, including its timestamp and source turn."""
         fact = mem.get("fact_text", "")
         created = mem.get("created_at", "")
+        source = mem.get("source_context", "")
+        if source:
+            source_short = source.replace("\n", " | ")[:100]
+            if len(source.replace("\n", " | ")) > 100:
+                source_short += "..."
+            fact = f"{fact}（来源：{source_short}）"
         if created:
             try:
                 dt = datetime.fromisoformat(created)

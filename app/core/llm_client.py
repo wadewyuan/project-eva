@@ -89,12 +89,11 @@ class LLMClient:
             return tone_map[tone]
         return "default"
 
-    async def extract_memories(self, user_msg: str, assistant_reply: str) -> list[dict]:
-        """Extract 0-3 important facts from a conversation turn."""
-        # Truncate assistant reply to avoid overwhelming the model
-        short_reply = assistant_reply[:200] if len(assistant_reply) > 200 else assistant_reply
+    async def extract_memories(self, user_msg: str) -> list[dict]:
+        """Extract 0-3 important facts from the user message only."""
         prompt = (
-            "从以下用户消息中提取值得长期记住的重要信息（如名字、喜好、工作、重要事件等）。\n"
+            "从以下用户消息中提取关于用户的、值得长期记住的重要信息（如名字、喜好、工作、重要事件等）。\n"
+            "只提取用户消息中的事实，不要猜测或编造。\n"
             "每行一个，格式：事实内容 | 分类 | 重要性(1-10)\n"
             "分类可选：喜好、生活、关系、工作、情绪、其他\n"
             "重要性：1=微不足道，10=极其重要\n"
