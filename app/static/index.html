@@ -409,6 +409,22 @@ body {
 .memory-item .del-btn:hover {
   color: #e53935;
 }
+.load-more-btn {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  margin-top: 4px;
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.load-more-btn:hover {
+  color: #333;
+  background: #f5f5f5;
+}
 .empty-state {
   text-align: center;
   color: #999;
@@ -625,6 +641,8 @@ let sessionId = null;
 let isStreaming = false;
 let allPersonas = [];
 let currentPersona = null;
+let allMemories = [];
+let memoriesPageSize = 50;
 
 function openSidebar() {
   document.getElementById('sidebar').classList.add('open');
@@ -783,13 +801,16 @@ async function sendMessage() {
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
+    let sseBuffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
       const chunk = decoder.decode(value);
-      const lines = chunk.split('\n');
+      sseBuffer += chunk;
+      const lines = sseBuffer.split('\n');
+      sseBuffer = lines.pop(); // keep incomplete line for next read
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         try {
@@ -818,6 +839,29 @@ async function sendMessage() {
         } catch (e) {}
       }
     }
+    // Process any remaining buffered line
+    if (sseBuffer.trim()) {
+      const line = sseBuffer.trim();
+      if (line.startsWith('data: ')) {
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.type === 'done') {
+            sessionId = data.session_id;
+            const badge = document.getElementById('toneBadge');
+            badge.textContent = data.tone_detected || '默认';
+            badge.style.display = 'inline';
+            assistantEl.classList.remove('streaming');
+            refreshMemories();
+            if (autoPlay && ttsBuffer.trim()) {
+              const seg = stripEmoji(ttsBuffer);
+              if (seg) ttsTextQueue.push(seg);
+              ttsBuffer = '';
+              processTTSPipeline();
+            }
+          }
+        } catch (e) {}
+      }
+    }
   } catch (err) {
     const textEl = assistantEl.querySelector('.msg-text');
     if (textEl) textEl.textContent = '出错啦，请重试';
@@ -828,26 +872,81 @@ async function sendMessage() {
   document.getElementById('sendBtn').disabled = false;
 }
 
-async function refreshMemories() {
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function createMemoryElement(m) {
+  const div = document.createElement('div');
+  div.className = 'memory-item';
+  div.dataset.id = m.id;
+  div.innerHTML = `
+    <div class="memory-content">
+      <div class="fact">${escapeHtml(m.fact_text)}</div>
+      <div class="meta">${escapeHtml(m.category)} · ${new Date(m.created_at).toLocaleString()}</div>
+    </div>
+    <button class="del-btn" title="删除">×</button>
+  `;
+  div.querySelector('.del-btn').onclick = () => deleteMemory(m.id);
+  return div;
+}
+
+function createEmptyState(text) {
+  const div = document.createElement('div');
+  div.className = 'empty-state';
+  div.textContent = text;
+  return div;
+}
+
+function renderMemoriesList() {
+  const container = document.getElementById('memoriesList');
+  container.innerHTML = '';
+
+  if (allMemories.length === 0) {
+    container.appendChild(createEmptyState('暂无记忆'));
+    return;
+  }
+
+  const toShow = allMemories.slice(0, memoriesPageSize);
+  const fragment = document.createDocumentFragment();
+  for (const m of toShow) {
+    fragment.appendChild(createMemoryElement(m));
+  }
+  container.appendChild(fragment);
+
+  if (allMemories.length > memoriesPageSize) {
+    const btn = document.createElement('button');
+    btn.className = 'load-more-btn';
+    btn.textContent = `加载更多 (${allMemories.length - memoriesPageSize} 条)`;
+    btn.onclick = () => {
+      memoriesPageSize += 50;
+      renderMemoriesList();
+    };
+    container.appendChild(btn);
+  }
+}
+
+async function refreshMemories(force = false) {
   try {
     const res = await fetch('/memories');
     const memories = await res.json();
-    const container = document.getElementById('memoriesList');
-    if (memories.length === 0) {
-      container.innerHTML = '<div class="empty-state">暂无记忆</div>';
+
+    // Skip re-render if data hasn't changed and not forced
+    if (!force && memories.length === allMemories.length &&
+        memories.length > 0 && allMemories.length > 0 &&
+        memories[0].id === allMemories[0].id) {
       return;
     }
-    container.innerHTML = memories.map(m => `
-      <div class="memory-item">
-        <div class="memory-content">
-          <div class="fact">${m.fact_text}</div>
-          <div class="meta">${m.category} · ${new Date(m.created_at).toLocaleString()}</div>
-        </div>
-        <button class="del-btn" onclick="deleteMemory(${m.id})" title="删除">×</button>
-      </div>
-    `).join('');
+
+    allMemories = memories;
+    memoriesPageSize = 50;
+    renderMemoriesList();
   } catch (err) {
-    document.getElementById('memoriesList').innerHTML = '<div class="empty-state">加载失败</div>';
+    const container = document.getElementById('memoriesList');
+    container.innerHTML = '';
+    container.appendChild(createEmptyState('加载失败'));
   }
 }
 
@@ -878,7 +977,18 @@ async function deleteMemory(id) {
     const res = await fetch(`/memories/${id}`, { method: 'DELETE' });
     const data = await res.json();
     if (data.ok) {
-      refreshMemories();
+      // Remove from DOM without full re-render
+      const el = document.querySelector(`.memory-item[data-id="${id}"]`);
+      if (el) {
+        el.remove();
+        // Update cached count, re-render if needed
+        allMemories = allMemories.filter(m => m.id !== id);
+        if (allMemories.length === 0) {
+          const container = document.getElementById('memoriesList');
+          container.innerHTML = '';
+          container.appendChild(createEmptyState('暂无记忆'));
+        }
+      }
     }
   } catch (err) {
     alert('删除失败，请重试');
@@ -1153,14 +1263,30 @@ async function startSeamlessVoice() {
     // PCM capture audio context (for streaming to ASR)
     pcmAudioContext = new AudioContext();
     pcmSource = pcmAudioContext.createMediaStreamSource(vadStream);
-    pcmProcessor = pcmAudioContext.createScriptProcessor(4096, 1, 1);
-    pcmProcessor.onaudioprocess = (e) => {
-      const input = e.inputBuffer.getChannelData(0);
-      const resampled = resampleLinear(input, pcmAudioContext.sampleRate, TARGET_SR);
+
+    // AudioWorklet replaces deprecated createScriptProcessor
+    const workletCode = `
+      class PCMProcessor extends AudioWorkletProcessor {
+        process(inputs, outputs, parameters) {
+          const input = inputs[0][0];
+          if (input) {
+            this.port.postMessage(input.slice());
+          }
+          return true;
+        }
+      }
+      registerProcessor('pcm-processor', PCMProcessor);
+    `;
+    const workletBlob = new Blob([workletCode], { type: 'application/javascript' });
+    const workletUrl = URL.createObjectURL(workletBlob);
+    await pcmAudioContext.audioWorklet.addModule(workletUrl);
+
+    pcmProcessor = new AudioWorkletNode(pcmAudioContext, 'pcm-processor');
+    pcmProcessor.port.onmessage = (e) => {
+      const resampled = resampleLinear(e.data, pcmAudioContext.sampleRate, TARGET_SR);
       pcmBuffer = concatFloat32(pcmBuffer, resampled);
     };
     pcmSource.connect(pcmProcessor);
-    pcmProcessor.connect(pcmAudioContext.destination);
 
     vadIsSpeech = false;
     vadSilenceStart = null;
@@ -1196,7 +1322,7 @@ function stopSeamlessVoice() {
   }
   if (pcmProcessor) {
     pcmProcessor.disconnect();
-    pcmProcessor.onaudioprocess = null;
+    pcmProcessor.port.onmessage = null;
     pcmProcessor = null;
   }
   if (pcmSource) {
