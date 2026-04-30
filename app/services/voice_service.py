@@ -11,7 +11,10 @@ from typing import Dict
 import edge_tts
 import numpy as np
 import torch
+from edge_tts.exceptions import NoAudioReceived
 from qwen_asr import Qwen3ASRModel
+
+from config.settings import settings
 
 MODEL_PATH = os.environ.get(
     "QWEN_ASR_MODEL_PATH",
@@ -51,11 +54,16 @@ def _strip_emoji(text: str) -> str:
 
 @dataclass
 class StreamingSession:
-    """Per-WebSocket streaming session state."""
+    """Per-WebSocket streaming session state.
+
+    Audio chunks are stored in a list to avoid O(n²) copying from repeated
+    np.concatenate on long utterances. Concatenation happens only at inference time.
+    """
 
     session_id: str
-    audio: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float32))
-    last_partial_audio_len: int = 0
+    audio_chunks: list = field(default_factory=list)  # list[np.ndarray]
+    total_samples: int = 0
+    last_partial_total_samples: int = 0
     is_finalizing: bool = False
     last_activity: float = field(default_factory=time.time)
 
@@ -66,7 +74,7 @@ class StreamingSession:
 class VoiceService:
     def __init__(self) -> None:
         self._model = None
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._executor = ThreadPoolExecutor(max_workers=settings.asr_max_workers)
         self._streaming_sessions: Dict[str, StreamingSession] = {}
 
     def _load_model(self) -> Qwen3ASRModel:
@@ -125,52 +133,66 @@ class VoiceService:
             self.remove_streaming_session(sid)
 
     def append_streaming_audio(self, session: StreamingSession, audio_pcm16: bytes) -> None:
-        """Append raw PCM16 bytes to a streaming session's audio buffer."""
+        """Append raw PCM16 bytes to a streaming session's audio buffer.
+
+        Chunks are accumulated in a list; concatenation only happens at inference time
+        to avoid O(n²) copying on long utterances.
+        """
         if not audio_pcm16:
             return
         wav = np.frombuffer(audio_pcm16, dtype=np.int16).astype(np.float32) / 32768.0
-        session.audio = np.concatenate([session.audio, wav])
+        session.audio_chunks.append(wav)
+        session.total_samples += len(wav)
         session.touch()
+
+    @staticmethod
+    def _get_audio(session: StreamingSession) -> np.ndarray:
+        """Concatenate all chunks once. O(total) instead of O(n²)."""
+        if not session.audio_chunks:
+            return np.array([], dtype=np.float32)
+        return np.concatenate(session.audio_chunks)
 
     async def try_streaming_partial(self, session: StreamingSession) -> str | None:
         """Emit a partial transcription if enough new audio has arrived."""
-        if session.is_finalizing or len(session.audio) == 0:
+        if session.is_finalizing or session.total_samples == 0:
             return None
 
-        new_audio = len(session.audio) - session.last_partial_audio_len
+        new_samples = session.total_samples - session.last_partial_total_samples
         min_samples = int(STREAMING_MIN_PARTIAL_SEC * STREAMING_SR)
-        if new_audio < min_samples:
+        if new_samples < min_samples:
             return None
 
         model = self._load_model()
+        audio = self._get_audio(session)
 
         # Transcribe the last N seconds to keep latency bounded.
         window_samples = int(STREAMING_PARTIAL_WINDOW_SEC * STREAMING_SR)
-        if len(session.audio) > window_samples:
-            window = session.audio[-window_samples:]
+        if len(audio) > window_samples:
+            window = audio[-window_samples:]
         else:
-            window = session.audio
+            window = audio
 
         def _do():
             results = model.transcribe(audio=(window, STREAMING_SR), language=None)
             return results[0].text if results else ""
 
         text = await asyncio.get_event_loop().run_in_executor(self._executor, _do)
-        session.last_partial_audio_len = len(session.audio)
+        session.last_partial_total_samples = session.total_samples
         session.touch()
         return text.strip() if text else None
 
     async def finish_streaming(self, session: StreamingSession) -> str:
         """Transcribe all accumulated audio and remove the session."""
         session.is_finalizing = True
-        if len(session.audio) == 0:
+        if session.total_samples == 0:
             self.remove_streaming_session(session.session_id)
             return ""
 
         model = self._load_model()
+        audio = self._get_audio(session)
 
         def _do():
-            results = model.transcribe(audio=(session.audio, STREAMING_SR), language=None)
+            results = model.transcribe(audio=(audio, STREAMING_SR), language=None)
             return results[0].text if results else ""
 
         text = await asyncio.get_event_loop().run_in_executor(self._executor, _do)
@@ -185,8 +207,20 @@ class VoiceService:
         text = _strip_emoji(text)
         if not text:
             raise ValueError("Text is empty after removing emojis")
-        communicate = edge_tts.Communicate(text, voice=TTS_VOICE)
-        await communicate.save(str(output_path))
+
+        last_error = None
+        for attempt in range(2):
+            try:
+                communicate = edge_tts.Communicate(text, voice=TTS_VOICE)
+                await communicate.save(str(output_path))
+                return
+            except NoAudioReceived as e:
+                last_error = e
+                if attempt == 0:
+                    await asyncio.sleep(0.5)
+                continue
+
+        raise RuntimeError(f"TTS synthesis failed after retries: {last_error}")
 
 
 voice_service = VoiceService()

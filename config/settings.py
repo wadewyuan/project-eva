@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     max_memories_in_context: int = 10
     memory_candidate_pool: int = 50
 
+    # Voice
+    asr_max_workers: int = 1
+
     # Persona
     default_persona_path: str = "./config/default_persona.yaml"
     personas_dir: str = "./personas"

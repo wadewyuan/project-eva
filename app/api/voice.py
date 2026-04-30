@@ -63,6 +63,10 @@ async def synthesize_text(req: VoiceSynthesizeRequest):
         if tmp_path and tmp_path.exists():
             tmp_path.unlink()
         raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink()
+        raise HTTPException(status_code=503, detail=str(exc))
     except Exception:
         if tmp_path and tmp_path.exists():
             tmp_path.unlink()
