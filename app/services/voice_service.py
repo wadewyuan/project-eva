@@ -1,15 +1,18 @@
 import asyncio
+import io
 import os
 import re
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict
+from typing import AsyncGenerator, Dict
 
 import edge_tts
 import numpy as np
+import soundfile as sf
 import torch
 from edge_tts.exceptions import NoAudioReceived
 from qwen_asr import Qwen3ASRModel
@@ -21,6 +24,13 @@ MODEL_PATH = os.environ.get(
     os.path.expanduser("~/src/project-eva/models/Qwen3-ASR-0.6B/")
 )
 TTS_VOICE = "zh-CN-XiaoxiaoNeural"
+VOXCPM_MODEL_ID = "openbmb/VoxCPM2"
+
+# VoxCPM optional import
+try:
+    from voxcpm import VoxCPM
+except ImportError:
+    VoxCPM = None  # type: ignore[misc,assignment]
 
 # Real-time streaming ASR parameters
 STREAMING_SR = 16000
@@ -74,8 +84,14 @@ class StreamingSession:
 class VoiceService:
     def __init__(self) -> None:
         self._model = None
+        # Single executor for all GPU work (ASR + TTS). Sharing one queue prevents
+        # ASR partials from being blocked behind a long TTS generation, since both
+        # contend for the same GPU anyway.
         self._executor = ThreadPoolExecutor(max_workers=settings.asr_max_workers)
         self._streaming_sessions: Dict[str, StreamingSession] = {}
+
+        self._voxcpm_model = None
+        self._voxcpm_lock = threading.Lock()
 
     def _load_model(self) -> Qwen3ASRModel:
         if self._model is None:
@@ -86,6 +102,86 @@ class VoiceService:
                 max_new_tokens=256,
             )
         return self._model
+
+    def _load_voxcpm_model(self):
+        # Double-checked locking: fast path avoids the lock once the model is loaded.
+        if self._voxcpm_model is not None:
+            return self._voxcpm_model
+        with self._voxcpm_lock:
+            if self._voxcpm_model is not None:
+                return self._voxcpm_model
+            if VoxCPM is None:
+                raise RuntimeError(
+                    "voxcpm is not installed. Run: uv add voxcpm soundfile"
+                )
+
+            # VoxCPM hard-codes torch.compile(mode="reduce-overhead"), which enables
+            # CUDA Graphs. CUDA Graphs key state to thread-local storage and crash
+            # with `_is_key_in_tls` assertions when the model is invoked from a
+            # ThreadPoolExecutor worker. Downgrade the mode at the torch.compile
+            # boundary so we keep Inductor codegen but skip graph capture.
+            import torch
+            if not getattr(torch.compile, "_eva_patched", False):
+                _orig_compile = torch.compile
+                def _safe_compile(*args, **kwargs):
+                    if kwargs.get("mode") == "reduce-overhead":
+                        kwargs["mode"] = "default"
+                    return _orig_compile(*args, **kwargs)
+                _safe_compile._eva_patched = True  # type: ignore[attr-defined]
+                torch.compile = _safe_compile  # type: ignore[assignment]
+
+            os.environ.setdefault("HF_ENDPOINT", settings.tts_voxcpm_hf_endpoint)
+            if settings.tts_voxcpm_model_source == "modelscope":
+                from modelscope import snapshot_download
+                model_dir = snapshot_download(
+                    "openbmb/VoxCPM2",
+                    cache_dir=settings.tts_voxcpm_cache_dir,
+                )
+                model = VoxCPM(
+                    voxcpm_model_path=model_dir,
+                    zipenhancer_model_path=None,
+                    enable_denoiser=False,
+                    optimize=True,
+                )
+            else:
+                model = VoxCPM.from_pretrained(
+                    VOXCPM_MODEL_ID,
+                    load_denoiser=settings.tts_voxcpm_load_denoiser,
+                    cache_dir=settings.tts_voxcpm_cache_dir,
+                    optimize=True,
+                )
+
+            # Warmup: pay torch.compile + autotuning cost now, on the loader thread,
+            # so the first user-facing request doesn't eat 5–15s of JIT.
+            try:
+                model.generate(
+                    text="初始化",
+                    cfg_value=settings.tts_voxcpm_cfg_value,
+                    inference_timesteps=settings.tts_voxcpm_inference_timesteps,
+                    normalize=True,
+                )
+            except Exception:
+                pass
+
+            self._voxcpm_model = model
+        return self._voxcpm_model
+
+    @property
+    def tts_provider(self) -> str:
+        return settings.tts_provider
+
+    @property
+    def tts_output_suffix(self) -> str:
+        # Both providers return MP3: edge natively, voxcpm encoded from PCM.
+        return ".mp3"
+
+    @property
+    def tts_media_type(self) -> str:
+        return "audio/mpeg"
+
+    @property
+    def tts_supports_streaming(self) -> bool:
+        return settings.tts_provider == "voxcpm"
 
     # ------------------------------------------------------------------
     # Non-streaming transcription
@@ -203,24 +299,159 @@ class VoiceService:
     # TTS
     # ------------------------------------------------------------------
 
-    async def synthesize(self, text: str, output_path: Path) -> None:
+    async def synthesize_bytes(
+        self,
+        text: str,
+        voice: str | None = None,
+        ref_wav: str | None = None,
+        prompt_text: str | None = None,
+    ) -> bytes:
+        """Synthesize `text` and return the encoded audio as MP3 bytes.
+
+        Both providers return MP3:
+        - edge_tts: streamed natively as MP3, collected into memory.
+        - voxcpm: PCM float32 → int16 → MP3 via libsndfile (no disk roundtrip).
+
+        For VoxCPM, `ref_wav` + `prompt_text` clone the voice from a reference
+        audio so output stays consistent across calls. Without them VoxCPM
+        samples a fresh speaker each time.
+        """
         text = _strip_emoji(text)
         if not text:
             raise ValueError("Text is empty after removing emojis")
 
+        if settings.tts_provider == "voxcpm":
+            return await self._synthesize_voxcpm_mp3(text, ref_wav, prompt_text)
+        return await self._synthesize_edge_mp3(text, voice=voice)
+
+    async def _synthesize_edge_mp3(self, text: str, voice: str | None = None) -> bytes:
+        voice_to_use = voice if voice else TTS_VOICE
         last_error = None
         for attempt in range(2):
             try:
-                communicate = edge_tts.Communicate(text, voice=TTS_VOICE)
-                await communicate.save(str(output_path))
-                return
+                communicate = edge_tts.Communicate(text, voice=voice_to_use)
+                buf = bytearray()
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        buf.extend(chunk["data"])
+                if not buf:
+                    raise NoAudioReceived("empty audio stream")
+                return bytes(buf)
             except NoAudioReceived as e:
                 last_error = e
                 if attempt == 0:
                     await asyncio.sleep(0.5)
                 continue
 
-        raise RuntimeError(f"TTS synthesis failed after retries: {last_error}")
+        raise RuntimeError(f"Edge TTS synthesis failed after retries: {last_error}")
+
+    @staticmethod
+    def _resolve_voxcpm_ref(ref_wav: str | None) -> str | None:
+        """Resolve a possibly-relative ref_wav path to an absolute path.
+
+        Returns None if the path is missing or doesn't exist (caller falls back
+        to random-speaker synthesis).
+        """
+        if not ref_wav:
+            return None
+        path = Path(ref_wav)
+        if not path.is_absolute():
+            path = Path(os.getcwd()) / path
+        return str(path) if path.exists() else None
+
+    def _build_voxcpm_kwargs(
+        self,
+        text: str,
+        ref_wav: str | None,
+        prompt_text: str | None,
+    ) -> dict:
+        kwargs: dict = {
+            "text": text,
+            "cfg_value": settings.tts_voxcpm_cfg_value,
+            "inference_timesteps": settings.tts_voxcpm_inference_timesteps,
+            "normalize": True,
+        }
+        # Fall through: persona config -> global default -> random speaker.
+        resolved_ref = (
+            self._resolve_voxcpm_ref(ref_wav)
+            or self._resolve_voxcpm_ref(settings.tts_voxcpm_ref_wav)
+        )
+        resolved_prompt = prompt_text or settings.tts_voxcpm_prompt_text
+        if resolved_ref and resolved_prompt:
+            kwargs["prompt_wav_path"] = resolved_ref
+            kwargs["prompt_text"] = resolved_prompt
+        return kwargs
+
+    async def _synthesize_voxcpm_mp3(
+        self,
+        text: str,
+        ref_wav: str | None = None,
+        prompt_text: str | None = None,
+    ) -> bytes:
+        model = self._load_voxcpm_model()
+        kwargs = self._build_voxcpm_kwargs(text, ref_wav, prompt_text)
+
+        def _do_generate() -> bytes:
+            wav = model.generate(**kwargs)
+            buf = io.BytesIO()
+            sf.write(buf, wav, model.tts_model.sample_rate, format="MP3")
+            return buf.getvalue()
+
+        return await asyncio.get_event_loop().run_in_executor(self._executor, _do_generate)
+
+    @property
+    def voxcpm_sample_rate(self) -> int:
+        """Sample rate of the loaded VoxCPM model. Loads the model if needed."""
+        return self._load_voxcpm_model().tts_model.sample_rate
+
+    async def synthesize_streaming_pcm(
+        self,
+        text: str,
+        ref_wav: str | None = None,
+        prompt_text: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        """Stream VoxCPM audio as raw PCM int16 LE chunks (mono, model sample rate).
+
+        Each yielded value is a `bytes` object containing PCM frames ready to
+        ship over a WebSocket. Use `voxcpm_sample_rate` for the rate.
+
+        For VoxCPM, `ref_wav` + `prompt_text` clone the voice from a reference
+        audio so output stays consistent across calls. Without them VoxCPM
+        samples a fresh speaker each time.
+
+        Raises:
+            RuntimeError: if the current provider is not voxcpm.
+        """
+        text = _strip_emoji(text)
+        if not text:
+            raise ValueError("Text is empty after removing emojis")
+        if settings.tts_provider != "voxcpm":
+            raise RuntimeError("Streaming TTS only supported with VoxCPM provider")
+
+        model = self._load_voxcpm_model()
+        kwargs = self._build_voxcpm_kwargs(text, ref_wav, prompt_text)
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _run():
+            try:
+                for chunk in model.generate_streaming(**kwargs):
+                    pcm = np.clip(chunk, -1.0, 1.0)
+                    pcm_i16 = (pcm * 32767.0).astype("<i2").tobytes()
+                    loop.call_soon_threadsafe(queue.put_nowait, pcm_i16)
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+
+        self._executor.submit(_run)
+
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
 
 
 voice_service = VoiceService()

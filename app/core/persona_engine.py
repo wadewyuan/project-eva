@@ -42,6 +42,7 @@ class PersonaEngine:
                 "id": pid,
                 "name": data.get("name", pid),
                 "description": data.get("description", ""),
+                "voice": data.get("voice"),
                 "is_active": pid == self.active_persona_id,
             })
 
@@ -55,6 +56,7 @@ class PersonaEngine:
                     "id": pid,
                     "name": data.get("name", pid),
                     "description": data.get("description", ""),
+                    "voice": data.get("voice"),
                     "is_active": pid == self.active_persona_id,
                 })
         return result

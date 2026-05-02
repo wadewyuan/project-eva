@@ -64,6 +64,7 @@ class PersonaDetail(BaseModel):
     name: str
     role: str
     description: str
+    voice: str | None = None
     tone: dict[str, str]
     speaking_style: list[str]
     personality_traits: list[str]

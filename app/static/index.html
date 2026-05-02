@@ -1147,23 +1147,108 @@ async function processTTSPipeline() {
     while (ttsTextQueue.length > 0) {
       const text = ttsTextQueue.shift();
       try {
-        const res = await fetch('/voice/synthesize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text })
-        });
-        if (!res.ok) continue;
-        const blob = await res.blob();
-        const arrayBuffer = await blob.arrayBuffer();
-        const audioBuffer = await getTTSAudioContext().decodeAudioData(arrayBuffer);
-        ttsAudioQueue.push({ buffer: audioBuffer });
-        scheduleTTSPlayback();
+        const caps = await getTTSCapabilities();
+        if (caps && caps.streaming) {
+          const ok = await synthesizeStreamingWS(text);
+          if (!ok) await synthesizeBlobHTTP(text);
+        } else {
+          await synthesizeBlobHTTP(text);
+        }
       } catch (e) {}
     }
   } finally {
     ttsIsSynthesizing = false;
     if (ttsTextQueue.length > 0) processTTSPipeline();
   }
+}
+
+let ttsCapabilities = null;
+let ttsCapabilitiesPromise = null;
+
+function getTTSCapabilities() {
+  if (ttsCapabilities) return Promise.resolve(ttsCapabilities);
+  if (ttsCapabilitiesPromise) return ttsCapabilitiesPromise;
+  ttsCapabilitiesPromise = fetch('/voice/capabilities')
+    .then(r => r.ok ? r.json() : null)
+    .then(c => { ttsCapabilities = c || { streaming: false }; return ttsCapabilities; })
+    .catch(() => { ttsCapabilities = { streaming: false }; return ttsCapabilities; });
+  return ttsCapabilitiesPromise;
+}
+
+async function synthesizeBlobHTTP(text) {
+  const res = await fetch('/voice/synthesize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text })
+  });
+  if (!res.ok) return false;
+  const blob = await res.blob();
+  const arrayBuffer = await blob.arrayBuffer();
+  const audioBuffer = await getTTSAudioContext().decodeAudioData(arrayBuffer);
+  ttsAudioQueue.push({ buffer: audioBuffer });
+  scheduleTTSPlayback();
+  return true;
+}
+
+function pcm16ToAudioBuffer(ctx, bytes, sampleRate) {
+  const view = new DataView(bytes);
+  const sampleCount = bytes.byteLength / 2;
+  if (sampleCount === 0) return null;
+  const buf = ctx.createBuffer(1, sampleCount, sampleRate);
+  const channel = buf.getChannelData(0);
+  for (let i = 0; i < sampleCount; i++) {
+    channel[i] = view.getInt16(i * 2, true) / 32768;
+  }
+  return buf;
+}
+
+function synthesizeStreamingWS(text) {
+  return new Promise((resolve) => {
+    let proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    let ws;
+    try {
+      ws = new WebSocket(`${proto}//${location.host}/voice/synthesize_stream`);
+    } catch (e) {
+      resolve(false);
+      return;
+    }
+    ws.binaryType = 'arraybuffer';
+    let sampleRate = null;
+    let gotChunks = 0;
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      try { ws.close(); } catch (e) {}
+      resolve(ok);
+    };
+    ws.onopen = () => {
+      try { ws.send(JSON.stringify({ text })); } catch (e) { finish(false); }
+    };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        if (msg.type === 'meta') {
+          sampleRate = msg.sampleRate;
+        } else if (msg.type === 'end') {
+          finish(gotChunks > 0);
+        } else if (msg.type === 'error') {
+          finish(false);
+        }
+      } else if (ev.data instanceof ArrayBuffer && sampleRate) {
+        const ctx = getTTSAudioContext();
+        const buf = pcm16ToAudioBuffer(ctx, ev.data, sampleRate);
+        if (buf) {
+          gotChunks++;
+          ttsAudioQueue.push({ buffer: buf });
+          scheduleTTSPlayback();
+        }
+      }
+    };
+    ws.onerror = () => finish(gotChunks > 0);
+    ws.onclose = () => finish(gotChunks > 0);
+  });
 }
 
 function scheduleTTSPlayback() {
