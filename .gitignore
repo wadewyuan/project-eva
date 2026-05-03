@@ -14,3 +14,6 @@ models/
 
 # SQLite database
 data/eva.db
+
+# Environment variables (contains secrets)
+.env
