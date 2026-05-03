@@ -10,12 +10,18 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM
+    # LLM (main model — handles chat, memory extraction)
     llm_base_url: str = "http://localhost:8080/v1"
     llm_model: str = "qwen-3.5-9b"
-    llm_api_key: str = "sk-no-key-required"
+    llm_api_key: str = "sk-no-...ired"
     llm_temperature: float = 0.8
     llm_max_tokens: int = 2048
+
+    # LLM (small model — tone detection only)
+    # If not set, falls back to the main LLM settings above.
+    llm_small_base_url: str | None = None
+    llm_small_model: str | None = None
+    llm_small_api_key: str | None = None
 
     # Memory
     max_context_messages: int = 20

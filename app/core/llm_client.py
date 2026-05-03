@@ -15,6 +15,21 @@ class LLMClient:
         self.model = settings.llm_model
         self.temperature = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
+        self._small_client: AsyncOpenAI | None = None
+
+    @property
+    def small_client(self) -> AsyncOpenAI:
+        """Lazy-initialized small model client for tone detection."""
+        if self._small_client is None:
+            base_url = settings.llm_small_base_url or settings.llm_base_url
+            api_key = settings.llm_small_api_key or settings.llm_api_key
+            self._small_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        return self._small_client
+
+    @property
+    def small_model(self) -> str:
+        """Small model name for tone detection. Falls back to main model if not set."""
+        return settings.llm_small_model or settings.llm_model
 
     async def chat(self, messages: list[dict[str, str]], stream: bool = False) -> str | AsyncIterator[str]:
         """Call the LLM. Returns full text or an async iterator for streaming."""
@@ -70,8 +85,8 @@ class LLMClient:
             f"用户消息：{user_message}\n"
             "标签："
         )
-        response = await self.client.chat.completions.create(
-            model=self.model,
+        response = await self.small_client.chat.completions.create(
+            model=self.small_model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=200,
