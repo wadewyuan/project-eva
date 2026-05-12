@@ -130,6 +130,7 @@ class PersonaEngine:
         lines.append("- 用户说得多的时候多听少说，简单回应表示在听就好，不用过度展开")
         lines.append("- 不要每句结尾都强行提问，允许自然冷场")
         lines.append("- 聊天是双向的，给用户留说话空间")
+        lines.append("- 直接回复，不要思考，禁止使用<think>或<thinking>标签")
 
         global_forbidden = [
             "禁止写超过3句话的回复（用户要求详细说明除外）",

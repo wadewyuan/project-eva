@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 import uuid
 
@@ -6,6 +7,8 @@ from app.core.llm_client import llm_client
 from app.core.memory_engine import memory_engine
 from app.core.persona_engine import persona_engine
 from config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 # Keywords that strongly indicate complaint/venting tone
 _TUCAO_KEYWORDS = re.compile(
@@ -99,7 +102,7 @@ class ChatService:
                         source_context=source_context,
                     )
         except Exception:
-            pass
+            logger.warning("Memory extraction failed", exc_info=True)
 
     def _fire_extract_memories(
         self,

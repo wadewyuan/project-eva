@@ -1,6 +1,13 @@
+import os
 import struct
 
 import numpy as np
+
+# FastEmbed defaults to /tmp which is cleared on reboot. Set cache path
+# *before* importing fastembed so the module picks it up during import.
+_fastembed_cache = os.environ.get("FASTEMBED_CACHE_PATH") or os.path.expanduser("~/.cache/fastembed")
+os.environ["FASTEMBED_CACHE_PATH"] = _fastembed_cache
+
 from fastembed import TextEmbedding
 
 

@@ -1,9 +1,12 @@
 import json
+import re
 from typing import AsyncIterator
 
 from openai import AsyncOpenAI
 
 from config.settings import settings
+
+_THINKING_RE = re.compile(r"<(thinking|think)>.*?</\1>", re.DOTALL)
 
 
 class LLMClient:
@@ -16,6 +19,10 @@ class LLMClient:
         self.temperature = settings.llm_temperature
         self.max_tokens = settings.llm_max_tokens
         self._small_client: AsyncOpenAI | None = None
+
+    @staticmethod
+    def _strip_thinking(text: str) -> str:
+        return _THINKING_RE.sub("", text).strip()
 
     @property
     def small_client(self) -> AsyncOpenAI:
@@ -43,7 +50,7 @@ class LLMClient:
             max_tokens=self.max_tokens,
         )
         msg = response.choices[0].message
-        return (msg.content or "").strip()
+        return self._strip_thinking(msg.content or "")
 
     async def _stream_chat(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         stream = await self.client.chat.completions.create(
@@ -53,12 +60,34 @@ class LLMClient:
             max_tokens=self.max_tokens,
             stream=True,
         )
+        buffer = ""
         async for chunk in stream:
             if chunk.choices:
                 delta = chunk.choices[0].delta
                 text = getattr(delta, "content", None) or ""
-                if text:
-                    yield text
+                if not text:
+                    continue
+                buffer += text
+
+                while True:
+                    match = _THINKING_RE.search(buffer)
+                    if not match:
+                        break
+                    before = buffer[:match.start()]
+                    if before:
+                        yield before
+                    buffer = buffer[match.end():]
+
+                if "<think" not in buffer and "<thinking" not in buffer:
+                    if buffer:
+                        yield buffer
+                        buffer = ""
+
+        if buffer:
+            clean = re.sub(r"<(thinking|think)>.*", "", buffer, flags=re.DOTALL)
+            clean = re.sub(r"</(thinking|think)>", "", clean)
+            if clean:
+                yield clean
 
     async def detect_tone(self, user_message: str) -> str:
         """Lightweight tone/scene detection."""
@@ -92,7 +121,7 @@ class LLMClient:
             max_tokens=200,
         )
         msg = response.choices[0].message
-        tone = (msg.content or "").strip() or "默认"
+        tone = self._strip_thinking(msg.content or "").strip() or "默认"
         tone = tone.strip().replace("，", "").replace("。", "").replace("：", "").replace(" ", "")
         tone_map = {
             "吐槽": "tucao",
@@ -106,6 +135,7 @@ class LLMClient:
 
     async def extract_memories(self, user_msg: str) -> list[dict]:
         """Extract 0-3 important facts from the user message only."""
+        user_msg = self._strip_thinking(user_msg)
         prompt = (
             "从以下用户消息中提取关于用户的、值得长期记住的重要信息（如名字、喜好、工作、重要事件等）。\n"
             "只提取用户消息中的事实，不要猜测或编造。\n"
@@ -118,14 +148,14 @@ class LLMClient:
             "提取结果："
         )
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            response = await self.small_client.chat.completions.create(
+                model=self.small_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
                 max_tokens=1024,
             )
             msg = response.choices[0].message
-            raw = (msg.content or "").strip()
+            raw = self._strip_thinking(msg.content or "")
             if not raw or raw == "无":
                 return []
             results = []
