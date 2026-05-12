@@ -133,17 +133,31 @@ class LLMClient:
             return tone_map[tone]
         return "default"
 
-    async def extract_memories(self, user_msg: str) -> list[dict]:
-        """Extract 0-3 important facts from the user message only."""
+    async def extract_memories(self, user_msg: str) -> dict[str, list[dict]]:
+        """Extract profile facts (A) and experience memories (B) from the user message.
+
+        Returns {"profiles": [...], "memories": [...]}.
+        """
         user_msg = self._strip_thinking(user_msg)
         prompt = (
-            "从以下用户消息中提取关于用户的、值得长期记住的重要信息（如名字、喜好、工作、重要事件等）。\n"
-            "只提取用户消息中的事实，不要猜测或编造。\n"
-            "每行一个，格式：事实内容 | 分类 | 重要性(1-10)\n"
+            "从以下用户消息中提取两类信息，只输出列表，不要解释。\n\n"
+            "【A类 - 用户画像】长期不变的事实：名字、职业、常住城市、"
+            "固定喜好（如'喜欢猫'）、性格特点。这类信息应该能被当作'用户的属性'。\n"
+            "格式：A | 事实类型 | 键 | 值 | 重要性(1-10)\n"
+            "事实类型可选：identity, preference, career, relationship, habit, other\n"
+            "键必须用英文 snake_case，如 name, job_title, hobby_pet\n"
+            "示例：A | identity | name | 张三 | 10\n"
+            "      A | preference | hobby | 喜欢跑步 | 6\n"
+            "      A | career | job_title | 产品经理 | 7\n\n"
+            "【B类 - 经历/事件】有时间属性或会过期的信息："
+            "上周做了什么、下周计划、临时情绪、八卦、一次性的活动。\n"
+            "格式：B | 内容 | 分类 | 时间属性 | 重要性(1-10)\n"
             "分类可选：喜好、生活、关系、工作、情绪、其他\n"
-            "重要性：1=微不足道，10=极其重要\n"
-            "如果没有则只回复：无\n"
-            "只输出列表，不要解释。\n\n"
+            "时间属性：past（已发生）/ future（未来计划）/ now（当前状态）/ unknown\n"
+            "示例：B | 上周去了迪士尼 | 生活 | past | 7\n"
+            "      B | 下周三要面试 | 工作 | future | 8\n"
+            "      B | 最近压力很大 | 情绪 | now | 6\n\n"
+            "如果没有值得记住的信息，只回复：无\n\n"
             f"用户消息：{user_msg}\n"
             "提取结果："
         )
@@ -157,31 +171,63 @@ class LLMClient:
             msg = response.choices[0].message
             raw = self._strip_thinking(msg.content or "")
             if not raw or raw == "无":
-                return []
-            results = []
+                return {"profiles": [], "memories": []}
+
+            profiles: list[dict] = []
+            memories: list[dict] = []
+
             for line in raw.split("\n"):
                 line = line.strip()
                 if not line or line == "无":
                     continue
-                if "|" in line:
-                    parts = line.split("|")
-                    fact = parts[0].strip().lstrip("-").strip()
-                    category = parts[1].strip() if len(parts) > 1 else "其他"
+                if "|" not in line:
+                    continue
+
+                parts = [p.strip() for p in line.split("|")]
+                tag = parts[0].lstrip("-").strip().upper()
+
+                if tag == "A" and len(parts) >= 4:
+                    fact_type = parts[1]
+                    fact_key = parts[2]
+                    fact_value = parts[3]
                     importance = 5
-                    if len(parts) > 2:
+                    if len(parts) > 4:
                         try:
-                            importance = int(parts[2].strip())
+                            importance = int(parts[4])
                             importance = max(1, min(10, importance))
                         except ValueError:
-                            importance = 5
-                    if fact:
-                        results.append({"fact": fact, "category": category, "importance": importance})
-                else:
-                    results.append({"fact": line.lstrip("-").strip(), "category": "其他", "importance": 5})
-            return results[:3]
+                            pass
+                    if fact_key and fact_value:
+                        profiles.append({
+                            "fact_type": fact_type,
+                            "fact_key": fact_key,
+                            "fact_value": fact_value,
+                            "importance": importance,
+                        })
+
+                elif tag == "B" and len(parts) >= 4:
+                    content = parts[1]
+                    category = parts[2]
+                    time_attr = parts[3] if len(parts) > 3 else "unknown"
+                    importance = 5
+                    if len(parts) > 4:
+                        try:
+                            importance = int(parts[4])
+                            importance = max(1, min(10, importance))
+                        except ValueError:
+                            pass
+                    if content:
+                        memories.append({
+                            "fact": content,
+                            "category": category,
+                            "time_attr": time_attr,
+                            "importance": importance,
+                        })
+
+            return {"profiles": profiles[:3], "memories": memories[:3]}
         except Exception:
             pass
-        return []
+        return {"profiles": [], "memories": []}
 
 
 llm_client = LLMClient()

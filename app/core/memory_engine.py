@@ -42,6 +42,19 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance_score);
+
+CREATE TABLE IF NOT EXISTS user_profile (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact_type TEXT NOT NULL,
+    fact_key TEXT NOT NULL UNIQUE,
+    fact_value TEXT NOT NULL,
+    confidence INTEGER NOT NULL DEFAULT 5,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    source_context TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_profile_type ON user_profile(fact_type);
 """
 
 FTS5_SQL = """
@@ -233,6 +246,65 @@ class MemoryEngine:
         try:
             await conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             await conn.execute("DELETE FROM memories WHERE session_id = ?", (session_id,))
+            # NOTE: user_profile is global, not tied to a single session
+            await conn.commit()
+        finally:
+            await conn.close()
+
+    # ---------- User Profile ----------
+
+    async def upsert_profile(
+        self,
+        fact_type: str,
+        fact_key: str,
+        fact_value: str,
+        confidence: int = 5,
+        source_context: str | None = None,
+    ) -> None:
+        """Insert a user profile fact, or update if the same fact_key exists."""
+        now = datetime.utcnow().isoformat()
+        conn = await self._connect()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO user_profile (fact_type, fact_key, fact_value, confidence, created_at, updated_at, source_context)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fact_key) DO UPDATE SET
+                    fact_value = excluded.fact_value,
+                    confidence = excluded.confidence,
+                    updated_at = excluded.updated_at,
+                    source_context = excluded.source_context
+                """,
+                (fact_type, fact_key, fact_value, confidence, now, now, source_context),
+            )
+            await conn.commit()
+        finally:
+            await conn.close()
+
+    async def get_user_profile(self) -> list[dict]:
+        """Return all user profile facts ordered by fact_type."""
+        conn = await self._connect()
+        try:
+            async with conn.execute(
+                "SELECT * FROM user_profile ORDER BY fact_type, updated_at DESC"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        finally:
+            await conn.close()
+
+    async def delete_profile(self, profile_id: int) -> None:
+        conn = await self._connect()
+        try:
+            await conn.execute("DELETE FROM user_profile WHERE id = ?", (profile_id,))
+            await conn.commit()
+        finally:
+            await conn.close()
+
+    async def clear_all_profiles(self) -> None:
+        conn = await self._connect()
+        try:
+            await conn.execute("DELETE FROM user_profile")
             await conn.commit()
         finally:
             await conn.close()

@@ -92,7 +92,12 @@ class PersonaEngine:
             return few_shot_map
         return []
 
-    def build_system_prompt(self, tone: str = "default", memories: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self,
+        tone: str = "default",
+        profile: list[dict] | None = None,
+        memories: list[str] | None = None,
+    ) -> str:
         persona = self.get_active()
         persona_id = self.active_persona_id or "default"
 
@@ -157,9 +162,29 @@ class PersonaEngine:
                 lines.append(f"你：{ex['assistant']}")
                 lines.append("")
 
+        # User profile — long-term facts (identity, preferences, etc.)
+        if profile:
+            lines.append("")
+            lines.append("【用户画像】")
+            grouped: dict[str, list[str]] = {}
+            for p in profile:
+                ft = p.get("fact_type", "other")
+                grouped.setdefault(ft, []).append(p["fact_value"])
+            for ft, items in sorted(grouped.items()):
+                type_names = {
+                    "identity": "身份",
+                    "preference": "喜好",
+                    "career": "职业",
+                    "relationship": "关系",
+                    "habit": "习惯",
+                    "other": "其他",
+                }
+                lines.append(f"{type_names.get(ft, ft)}：" + "、".join(items))
+
+        # Experience memories — time-bound events, plans, gossip
         if memories:
             lines.append("")
-            lines.append("【你记得关于用户的事】")
+            lines.append("【你记得关于用户的往事】")
             for m in memories:
                 lines.append(f"- {m}")
 

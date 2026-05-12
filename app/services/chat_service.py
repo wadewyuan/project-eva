@@ -59,8 +59,9 @@ class ChatService:
                     tone = "tucao"
                     break
 
+        profile = await memory_engine.get_user_profile()
         memories = await memory_engine.get_relevant_memories(session_id, message)
-        system_prompt = persona_engine.build_system_prompt(tone=tone, memories=memories)
+        system_prompt = persona_engine.build_system_prompt(tone=tone, profile=profile, memories=memories)
 
         recent = await memory_engine.get_session_messages(session_id, limit=settings.max_context_messages)
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
@@ -85,11 +86,26 @@ class ChatService:
         user_message: str,
         assistant_reply: str,
     ) -> None:
-        """Background task: extract and store memories from a conversation turn."""
+        """Background task: extract and store profile + experience memories."""
         source_context = f"用户：{user_message}\n助手：{assistant_reply}"
         try:
             extracted = await llm_client.extract_memories(user_message)
-            for item in extracted:
+
+            # A. User profile (long-term facts)
+            for p in extracted.get("profiles", []):
+                fact_key = p.get("fact_key", "").strip()
+                fact_value = p.get("fact_value", "").strip()
+                if fact_key and fact_value:
+                    await memory_engine.upsert_profile(
+                        fact_type=p.get("fact_type", "other"),
+                        fact_key=fact_key,
+                        fact_value=fact_value,
+                        confidence=p.get("importance", 5),
+                        source_context=source_context,
+                    )
+
+            # B. Experience memories (time-bound events)
+            for item in extracted.get("memories", []):
                 fact = item.get("fact", "")
                 category = item.get("category", "其他")
                 importance = item.get("importance", 5)
